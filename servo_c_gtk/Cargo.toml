@@ -1,0 +1,22 @@
+[package]
+name = "libservogtk"
+version = "0.3.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"] # .so/.dll/.dylib
+name = "libservogtk"
+path = "libservogtk/lib.rs"
+
+[dependencies]
+servo = "0.3.0"
+# Versions pinned to whatever `servo` resolves to, so the euclid/dpi/url types
+# unify with Servo's own (a mismatched copy would be a distinct, incompatible type).
+euclid = "0.22"
+dpi = "0.1"
+url = "2.5"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
+[build-dependencies]
+glib-build-tools = "0.22"
+prost-build = "0.13"
