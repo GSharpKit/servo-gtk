@@ -1,2 +1,5 @@
 target/
 .idea/
+servo_c_gtk/Cargo.lock
+servo_c_gtk/cmake-build-debug/
+
