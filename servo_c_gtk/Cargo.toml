@@ -6,7 +6,7 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib"] # .so/.dll/.dylib
 name = "libservogtk"
-path = "libservogtk/lib.rs"
+path = "servo/servo-webview.rs"
 
 [dependencies]
 servo = "0.3.0"

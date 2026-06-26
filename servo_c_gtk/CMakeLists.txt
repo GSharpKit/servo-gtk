@@ -7,6 +7,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
 
+# Resolve standard install dirs (CMAKE_INSTALL_LIBDIR -> lib64 on Fedora,
+# CMAKE_INSTALL_BINDIR -> bin). Configure with -DCMAKE_INSTALL_PREFIX=/usr to
+# land the libraries in /usr/lib64.
+include(GNUInstallDirs)
+
 pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
 pkg_check_modules(GOBJECT_INTROSPECTION REQUIRED gobject-introspection-1.0)
 
@@ -31,7 +36,7 @@ add_library(servogtk3 SHARED
 target_include_directories(servogtk3
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/libservogtk
+        ${CMAKE_CURRENT_SOURCE_DIR}/servo
         ${GTK3_INCLUDE_DIRS}
 )
 
@@ -53,37 +58,52 @@ else()
     set(CARGO_PROFILE_DIR "release")
 endif()
 
-# Path of the cdylib Cargo produces (liblibservogtk.so on Linux: the "lib"
-# prefix/.so suffix are added by the platform, on top of the crate's own
-# "libservogtk" lib name).
-set(SERVOGTK_RUST_LIB
-        ${CMAKE_CURRENT_SOURCE_DIR}/target/${CARGO_PROFILE_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}libservogtk${CMAKE_SHARED_LIBRARY_SUFFIX}
+# The crate is presented as "libservo". Cargo still emits liblibservogtk.so (the
+# crate can't be named `servo` without colliding with its `servo` dependency),
+# but build.rs stamps it with soname libservo.so.0, and we lay down the versioned
+# libservo.so.0.3.0 / libservo.so.0 / libservo.so symlinks next to it. These names
+# mirror servogtk3's VERSION/SOVERSION below.
+set(SERVO_OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/target/${CARGO_PROFILE_DIR})
+set(CARGO_OUTPUT
+        ${SERVO_OUTPUT_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}libservogtk${CMAKE_SHARED_LIBRARY_SUFFIX}
 )
+# Real, versioned file (dereferenced on install) and the soname/dev symlinks.
+set(SERVO_REAL  ${SERVO_OUTPUT_DIR}/libservo.so.0.3.0)
+set(SERVO_SONAME ${SERVO_OUTPUT_DIR}/libservo.so.0)
+set(SERVO_LINK  ${SERVO_OUTPUT_DIR}/libservo.so)
 
 # Re-run Cargo when any Rust source or the manifest changes. Cargo's own
 # incremental build makes a no-op invocation cheap.
-file(GLOB_RECURSE SERVOGTK_RUST_SOURCES CONFIGURE_DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/libservogtk/*.rs
+file(GLOB_RECURSE SERVO_SOURCES CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/servo/*.rs
 )
 
+# Build the cdylib, then create the libservo.so{,.0,.0.3.0} symlink chain in the
+# Cargo output dir (relative targets keep the chain valid after install too).
 add_custom_command(
-        OUTPUT ${SERVOGTK_RUST_LIB}
+        OUTPUT ${CARGO_OUTPUT} ${SERVO_REAL} ${SERVO_SONAME} ${SERVO_LINK}
         COMMAND ${CARGO_EXECUTABLE} build ${CARGO_BUILD_FLAGS}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        DEPENDS ${SERVOGTK_RUST_SOURCES}
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+                ${CMAKE_SHARED_LIBRARY_PREFIX}libservogtk${CMAKE_SHARED_LIBRARY_SUFFIX} libservo.so.0.3.0
+        COMMAND ${CMAKE_COMMAND} -E create_symlink libservo.so.0.3.0 libservo.so.0
+        COMMAND ${CMAKE_COMMAND} -E create_symlink libservo.so.0 libservo.so
+        WORKING_DIRECTORY ${SERVO_OUTPUT_DIR}
+        DEPENDS ${SERVO_SOURCES}
                 ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
                 ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock
-        COMMENT "Building Rust Servo wrapper (cargo build ${CARGO_BUILD_FLAGS})"
+                ${CMAKE_CURRENT_SOURCE_DIR}/build.rs
+        COMMENT "Building Rust Servo wrapper (cargo build ${CARGO_BUILD_FLAGS}) + libservo symlinks"
         VERBATIM
 )
 
-add_custom_target(servogtk_rust DEPENDS ${SERVOGTK_RUST_LIB})
+add_custom_target(SERVO DEPENDS ${CARGO_OUTPUT} ${SERVO_LINK})
 
-# Link the produced .so by path, and force Cargo to run before this C library is
-# linked. The full path also adds target/<profile> to the build-tree RPATH, so
-# the loader resolves liblibservogtk.so at runtime.
-add_dependencies(servogtk3 servogtk_rust)
-target_link_libraries(servogtk3 PUBLIC ${SERVOGTK_RUST_LIB})
+# Link against the libservo.so symlink: the linker reads its soname
+# (libservo.so.0) and records that as servogtk3's NEEDED entry. The full path
+# also adds target/<profile> to the build-tree RPATH, where libservo.so.0
+# resolves at runtime.
+add_dependencies(servogtk3 SERVO)
+target_link_libraries(servogtk3 PUBLIC ${SERVO_LINK})
 
 target_compile_options(servogtk3
         PRIVATE
@@ -99,6 +119,9 @@ set_target_properties(servogtk3 PROPERTIES
         OUTPUT_NAME "servogtk3"
         VERSION 0.3.0
         SOVERSION 0
+        # The installed library finds libservo.so.0 next to it in the install
+        # libdir. The build tree keeps its own RUNPATH (target/<profile>).
+        INSTALL_RPATH "$ORIGIN"
 )
 
 add_custom_command(
@@ -140,36 +163,70 @@ add_custom_target(gir ALL
 )
 
 install(TARGETS servogtk3
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib
-        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# The Rust cdylib (libservo) that servogtk3 links against is built by Cargo, not
+# a CMake target, so install it explicitly. install(FILES) copies symlinks
+# verbatim, so install the real Cargo output renamed to the versioned name, then
+# recreate the soname/dev symlinks in the install tree — the same layout CMake
+# would generate for a versioned library target.
+install(FILES ${CARGO_OUTPUT}
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RENAME libservo.so.0.3.0
+)
+install(CODE "
+    file(CREATE_LINK libservo.so.0.3.0 \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libservo.so.0\" SYMBOLIC)
+    file(CREATE_LINK libservo.so.0     \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libservo.so\"   SYMBOLIC)
+")
 
 install(FILES ${SERVO_GTK_PUBLIC_HEADERS}
         DESTINATION include/servogtk3
 )
 
+# C ABI header for the Rust wrapper (libservo).
+install(FILES servo/servo-webview.h
+        DESTINATION include/servogtk3
+)
+
+# GIR/typelib are produced by g-ir-scanner, which currently crashes when it
+# loads the Servo-backed library standalone. Install them only when present so a
+# library install still succeeds without the introspection data.
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_GIR}
         DESTINATION share/gir-1.0
+        OPTIONAL
 )
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_TYPELIB}
-        DESTINATION lib/girepository-1.0
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/girepository-1.0
+        OPTIONAL
 )
 
-add_executable(servo_gtk_demo
+add_executable(servo-gtk-demo
         demo/servo-gtk-demo.c)
 
-target_include_directories(servo_gtk_demo
+target_include_directories(servo-gtk-demo
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${GTK3_INCLUDE_DIRS})
 
-target_compile_options(servo_gtk_demo
+target_compile_options(servo-gtk-demo
         PRIVATE
         ${GTK3_CFLAGS_OTHER})
 
-target_link_libraries(servo_gtk_demo
+target_link_libraries(servo-gtk-demo
         PRIVATE
         servogtk3
         ${GTK3_LIBRARIES})
+
+# Installed to <prefix>/bin, it finds servogtk3 + libservo in the install libdir
+# via a relative rpath.
+set_target_properties(servo-gtk-demo PROPERTIES
+        INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+)
+
+install(TARGETS servo-gtk-demo
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
