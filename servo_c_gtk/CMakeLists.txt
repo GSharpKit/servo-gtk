@@ -43,7 +43,8 @@ target_include_directories(servogtk3
 # The Servo wrapper is built by Cargo (crate-type = cdylib). Rather than rely on
 # a pre-built artifact, drive Cargo from CMake so the .so is always built (and
 # rebuilt on source changes) before the C library links against it.
-find_program(CARGO_EXECUTABLE cargo
+#find_program(CARGO_EXECUTABLE cargo
+find_program(RUSTUP_EXECUTABLE rustup
         HINTS $ENV{CARGO_HOME}/bin $ENV{HOME}/.cargo/bin
         REQUIRED
 )
@@ -82,7 +83,7 @@ file(GLOB_RECURSE SERVO_SOURCES CONFIGURE_DEPENDS
 # Cargo output dir (relative targets keep the chain valid after install too).
 add_custom_command(
         OUTPUT ${CARGO_OUTPUT} ${SERVO_REAL} ${SERVO_SONAME} ${SERVO_LINK}
-        COMMAND ${CARGO_EXECUTABLE} build ${CARGO_BUILD_FLAGS}
+        COMMAND ${RUSTUP_EXECUTABLE} run nightly cargo build ${CARGO_BUILD_FLAGS}
         COMMAND ${CMAKE_COMMAND} -E create_symlink
                 ${CMAKE_SHARED_LIBRARY_PREFIX}libservogtk${CMAKE_SHARED_LIBRARY_SUFFIX} libservo.so.0.3.0
         COMMAND ${CMAKE_COMMAND} -E create_symlink libservo.so.0.3.0 libservo.so.0

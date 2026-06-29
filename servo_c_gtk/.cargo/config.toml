@@ -1,0 +1,4 @@
+[build]
+rustflags = [
+    "-Ztls-model=global-dynamic"
+]
