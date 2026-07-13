@@ -125,6 +125,43 @@ set_target_properties(servogtk3 PROPERTIES
         INSTALL_RPATH "$ORIGIN"
 )
 
+# --- Introspection scanner twin -------------------------------------------
+# g-ir-scanner links a helper program against the target library and RUNS it to
+# dump GObject metadata. Linking the real servogtk3 pulls in libservoshell (the
+# Servo Rust runtime), whose jemalloc load-time constructor SIGSEGVs inside the
+# scanner's minimal dependency closure (it loads fine in the full demo/CLR
+# process). Introspection never instantiates a webview — it only reads the
+# ServoGtkWebView type/properties/signals from class_init, which never call the
+# servo_webview_* FFI. So build a twin of the library from the same C sources
+# plus no-op FFI stubs (servo-webview-scan-stub.c) with NO dependency on
+# libservoshell, and point the scanner at it. It carries the same OUTPUT_NAME
+# and soname (libservogtk3.so.0) as the real library, so the shared-library
+# recorded in the GIR is correct and consumers load the real runtime at run
+# time. Kept in a separate output dir so it never shadows the real servogtk3.so.
+add_library(servogtk3-scan SHARED
+        ${SERVO_GTK_SOURCES}
+        servo-webview-scan-stub.c
+        ${SERVO_GTK_PUBLIC_HEADERS}
+)
+
+target_include_directories(servogtk3-scan
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/servo
+        ${GTK3_INCLUDE_DIRS}
+)
+
+target_compile_options(servogtk3-scan PRIVATE ${GTK3_CFLAGS_OTHER})
+target_link_libraries(servogtk3-scan PRIVATE ${GTK3_LIBRARIES})
+
+set(SERVO_GTK_SCAN_DIR ${CMAKE_CURRENT_BINARY_DIR}/scan)
+set_target_properties(servogtk3-scan PROPERTIES
+        OUTPUT_NAME servogtk3
+        VERSION 0.3.0
+        SOVERSION 0
+        LIBRARY_OUTPUT_DIRECTORY ${SERVO_GTK_SCAN_DIR}
+)
+
 add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_GIR}
         COMMAND
@@ -136,13 +173,13 @@ add_custom_command(
         --symbol-prefix=servo_gtk
         --include=Gtk-3.0
         --library=servogtk3
-        --library-path=${CMAKE_CURRENT_BINARY_DIR}
+        --library-path=${SERVO_GTK_SCAN_DIR}
         --output=${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_GIR}
         -I${CMAKE_CURRENT_SOURCE_DIR}
         ${SERVO_GTK_PUBLIC_HEADERS}
         ${SERVO_GTK_SOURCES}
         ${GTK3_CFLAGS}
-        DEPENDS servogtk3
+        DEPENDS servogtk3-scan
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         VERBATIM
 )
@@ -192,9 +229,9 @@ install(FILES servo/servo-webview.h
         DESTINATION include/servogtk3
 )
 
-# GIR/typelib are produced by g-ir-scanner, which currently crashes when it
-# loads the Servo-backed library standalone. Install them only when present so a
-# library install still succeeds without the introspection data.
+# GIR/typelib are produced by g-ir-scanner against the servogtk3-scan twin (see
+# above). Kept OPTIONAL so a library install still succeeds even if the
+# introspection data was not built.
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_GIR}
         DESTINATION share/gir-1.0
         OPTIONAL

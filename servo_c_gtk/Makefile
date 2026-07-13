@@ -1,8 +1,10 @@
 all: build-release
 
 build-release:
-	cargo +nightly build --release
-	cmake --build cmake-build-release
+	#-mkdir cmake-build-release
+	#cargo +nightly build --release
+	cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release
+	cmake --build cmake-build-release --config Release
 
 install:
 	sudo cmake --install cmake-build-release --prefix /usr
