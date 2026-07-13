@@ -17,6 +17,23 @@ dpi = "0.1"
 url = "2.5"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
+# Use Servo's own global allocator crate, which declares `#[global_allocator]`
+# itself. With `use-system-allocator` OFF (the default) it resolves to
+# jemalloc (`tikv_jemallocator::Jemalloc`). Do NOT enable use-system-allocator:
+# features unify across the graph, so it would flip the whole tree back to the
+# system allocator.
+[dependencies.servo-allocator]
+version = "0.3.0"
+
+# jemalloc must NOT use the initial-exec TLS model, or the baked engine overflows
+# the static TLS block when the .so is dlopen'd after startup (e.g. .NET P/Invoke /
+# NativeLibrary.Load). `disable_initial_exec_tls` feature-unifies onto the single
+# jemalloc build used by servo-allocator. Pairs with `-Ztls-model=global-dynamic`
+# in .cargo/config.toml (which covers the Rust-side thread_local!s).
+[dependencies.tikv-jemalloc-sys]
+version = "0.6.1"
+features = ["disable_initial_exec_tls"]
+
 [build-dependencies]
 glib-build-tools = "0.22"
 prost-build = "0.13"
