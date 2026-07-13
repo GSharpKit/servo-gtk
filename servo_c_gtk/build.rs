@@ -6,5 +6,5 @@
 // library as "libservo" everywhere it matters. CMake then installs it under the
 // versioned libservo.so.0.3.0 / libservo.so.0 / libservo.so names.
 fn main() {
-    println!("cargo::rustc-link-arg-cdylib=-Wl,-soname,libservo.so.0");
+    println!("cargo::rustc-link-arg-cdylib=-Wl,-soname,libservoshell.so.0");
 }

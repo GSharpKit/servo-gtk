@@ -1,5 +1,3 @@
-# gcc / Linux
-
 ## General
 
 * Respond in English unless the code or existing comments are in another language.
@@ -10,8 +8,15 @@
 * Make small, safe changes rather than large refactorings.
 * Preserve the existing architecture, naming conventions, and formatting.
 
-## C Style
+## Rust
+* Use the existing Rust code as a reference.
+* Use the existing Rust code as a guide.
+* Use the existing Rust code as a starting point.
+* Use the existing Rust code as a template.
+* Use 'tls-model=global-dynamic'
 
+## Embedding API
+* Use 'disable_initial_exec_tls' for embedding API
 
 ## Security
 

@@ -14,3 +14,5 @@ install-nightly:
 
 clean:
 	cargo +nightly clean
+	-rm -rf cmake-build-release
+	-rm -rf cmake-build-debug
