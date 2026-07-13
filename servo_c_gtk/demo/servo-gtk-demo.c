@@ -5,13 +5,41 @@
 
 #include "servo-gtk-web-view.h"
 
+/* Navigate the web view to the URL typed in the entry (Enter pressed). */
+static void
+on_url_entry_activate(GtkEntry *entry, gpointer user_data)
+{
+    ServoGtkWebView *web_view = SERVO_GTK_WEB_VIEW(user_data);
+    const gchar     *text = gtk_entry_get_text(entry);
+
+    if (text == NULL || *text == '\0') {
+        return;
+    }
+
+    /*
+     * Servo drops URLs it can't parse, so a bare host like "example.com" would
+     * silently do nothing. If no scheme was typed, assume https://.
+     */
+    gchar *scheme = g_uri_parse_scheme(text);
+    if (scheme == NULL) {
+        gchar *uri = g_strconcat("https://", text, NULL);
+        servo_gtk_web_view_load_uri(web_view, uri);
+        g_free(uri);
+    } else {
+        g_free(scheme);
+        servo_gtk_web_view_load_uri(web_view, text);
+    }
+}
+
 static void
 activate(GtkApplication *app, gpointer user_data)
 {
-    GtkWidget *window;
-    GtkWidget *box;
-    GtkWidget *label;
-    GtkWidget *web_view;
+    GtkWidget  *window;
+    GtkWidget  *box;
+    GtkWidget  *label;
+    GtkWidget  *url_entry;
+    GtkWidget  *web_view;
+    const char *initial_uri = "https://servo.org";
 
     window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(window), "Servo GTK Demo");
@@ -36,12 +64,20 @@ activate(GtkApplication *app, gpointer user_data)
     web_view = GTK_WIDGET(servo_gtk_web_view_new());
     gtk_widget_set_hexpand(web_view, TRUE);
     gtk_widget_set_vexpand(web_view, TRUE);
+
+    /* URL bar: type an address and press Enter to navigate. */
+    url_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(url_entry), "Enter URL and press Enter");
+    gtk_entry_set_text(GTK_ENTRY(url_entry), initial_uri);
+    gtk_widget_set_margin_start(url_entry, 12);
+    gtk_widget_set_margin_end(url_entry, 12);
+    gtk_widget_set_margin_bottom(url_entry, 12);
+    g_signal_connect(url_entry, "activate", G_CALLBACK(on_url_entry_activate), web_view);
+    gtk_box_pack_start(GTK_BOX(box), url_entry, FALSE, FALSE, 0);
+
     gtk_box_pack_start(GTK_BOX(box), web_view, TRUE, TRUE, 0);
 
-    servo_gtk_web_view_load_uri(
-        SERVO_GTK_WEB_VIEW(web_view),
-        "https://servo.org"
-    );
+    servo_gtk_web_view_load_uri(SERVO_GTK_WEB_VIEW(web_view), initial_uri);
 
     gtk_widget_show_all(window);
 }
