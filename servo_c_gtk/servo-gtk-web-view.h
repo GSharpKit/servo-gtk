@@ -5,7 +5,7 @@
 
 G_BEGIN_DECLS
 
-/* Opaque Servo webview handle, defined by the Rust FFI (libservogtk/servo-webview.h). */
+/* Opaque Servo webview handle, defined by the Rust FFI (libservoshell/servo-webview.h). */
 typedef struct ServoWebViewHandle ServoWebViewHandle;
 
 #define SERVO_GTK_TYPE_WEB_VIEW                (servo_gtk_web_view_get_type ())

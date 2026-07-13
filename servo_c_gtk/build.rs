@@ -1,6 +1,6 @@
 // Give the cdylib a stable name so dependents (servogtk3, the demo) record a
 // dependency on "libservoshell" rather than the raw Cargo output name. The file
-// Cargo emits is still liblibservogtk.<ext> (the crate can't be named `servo` —
+// Cargo emits is still libservoshell.<ext> (the crate can't be named `servo` —
 // it would collide with the `servo` dependency it `use`s); what dependents key
 // off is the object format's embedded library name, so stamping that is enough
 // to present the library as "libservoshell" everywhere it matters. CMake then

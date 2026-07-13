@@ -1,5 +1,5 @@
 /*
- * C ABI for libservogtk — a thin wrapper around Servo's WebView.
+ * C ABI for libservoshell — a thin wrapper around Servo's WebView.
  *
  * All functions must be called from a single thread (the GTK main thread):
  * the underlying Servo objects are not thread-safe.

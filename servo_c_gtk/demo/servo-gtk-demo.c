@@ -25,7 +25,7 @@ activate(GtkApplication *app, gpointer user_data)
     gtk_label_set_markup(
         GTK_LABEL(label),
         "<b>Servo GTK Demo</b>\n"
-        "This demo uses libservogtk and ServoGtkWebView."
+        "This demo uses libservoshell and ServoGtkWebView."
     );
     gtk_widget_set_margin_start(label, 12);
     gtk_widget_set_margin_end(label, 12);

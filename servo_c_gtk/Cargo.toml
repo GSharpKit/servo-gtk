@@ -1,11 +1,11 @@
 [package]
-name = "libservogtk"
+name = "libservoshell"
 version = "0.3.0"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib"] # .so/.dll/.dylib
-name = "libservogtk"
+name = "libservoshell"
 path = "servo/servo-webview.rs"
 
 [dependencies]
@@ -22,9 +22,12 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 # NativeLibrary.Load). `disable_initial_exec_tls` feature-unifies onto the single
 # jemalloc build used by servo-allocator. Pairs with `-Ztls-model=global-dynamic`
 # in .cargo/config.toml (which covers the Rust-side thread_local!s).
-[dependencies.tikv-jemalloc-sys]
-version = "0.6.1"
-features = ["disable_initial_exec_tls"]
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemalloc-sys = { version = "0.6.1", features = ["disable_initial_exec_tls"] }
+
+# [dependencies.tikv-jemalloc-sys]
+# version = "0.6.1"
+# features = ["disable_initial_exec_tls"]
 
 [build-dependencies]
 glib-build-tools = "0.22"
