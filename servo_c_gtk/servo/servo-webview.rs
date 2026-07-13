@@ -30,8 +30,8 @@ use euclid::Point2D;
 use servo::{
     Code, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, Key, KeyState, KeyboardEvent, Location,
     Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
-    RenderingContext, Scroll, Servo, ServoBuilder, SoftwareRenderingContext, WebView,
-    WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
+    PrefValue, Preferences, RenderingContext, Scroll, Servo, ServoBuilder, SoftwareRenderingContext,
+    WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
 };
 use url::Url;
 
@@ -202,6 +202,66 @@ unsafe fn as_handle<'a>(ptr: *mut ServoWebViewHandle) -> Option<&'a ServoWebView
     unsafe { ptr.as_ref() }
 }
 
+/// Experimental Web-platform features, gated behind preferences that default to
+/// off. Enabling all of these is the equivalent of servoshell's
+/// `--enable-experimental-web-platform-features` flag.
+///
+/// This mirrors the `// feature:`-annotated preferences in `servo-config`'s
+/// `prefs.rs` (v0.3.0). Servo exposes no runtime "is experimental" query, so the
+/// list is maintained by hand — revisit it when bumping the `servo` dependency.
+/// Names are looked up with [`Preferences::exists`] before being set, so an entry
+/// that disappears in a future version is skipped rather than panicking.
+const EXPERIMENTAL_WEB_PLATFORM_FEATURES: &[&str] = &[
+    "dom_webgpu_enabled",
+    "dom_abort_controller_enabled",
+    "dom_adoptedstylesheet_enabled",
+    "dom_async_clipboard_enabled",
+    "dom_canvas_capture_enabled",
+    "dom_cookiestore_enabled",
+    "dom_credential_management_enabled",
+    "dom_crypto_subtle_enabled",
+    "dom_exec_command_enabled",
+    "dom_fontface_enabled",
+    "dom_gamepad_enabled",
+    "dom_geolocation_enabled",
+    "dom_wakelock_enabled",
+    "dom_indexeddb_enabled",
+    "dom_intersection_observer_enabled",
+    "dom_mutation_observer_enabled",
+    "dom_navigator_protocol_handlers_enabled",
+    "dom_notification_enabled",
+    "dom_offscreen_canvas_enabled",
+    "dom_permissions_enabled",
+    "dom_resize_observer_enabled",
+    "dom_sanitizer_enabled",
+    "dom_storage_manager_api_enabled",
+    "dom_serviceworker_enabled",
+    "dom_sharedworker_enabled",
+    "dom_webgl2_enabled",
+    "dom_webrtc_enabled",
+    "dom_webrtc_transceiver_enabled",
+    "dom_webvtt_enabled",
+    "dom_webxr_layers_enabled",
+    "dom_visual_viewport_enabled",
+    "largest_contentful_paint_enabled",
+    "layout_columns_enabled",
+    "layout_grid_enabled",
+    "layout_variable_fonts_enabled",
+    "layout_writing_mode_enabled",
+];
+
+/// Build the default [`Preferences`] with every experimental Web-platform
+/// feature in [`EXPERIMENTAL_WEB_PLATFORM_FEATURES`] turned on.
+fn experimental_preferences() -> Preferences {
+    let mut preferences = Preferences::default();
+    for name in EXPERIMENTAL_WEB_PLATFORM_FEATURES {
+        if Preferences::exists(name) {
+            preferences.set_value(name, PrefValue::Bool(true));
+        }
+    }
+    preferences
+}
+
 /// Create a new Servo webview.
 ///
 /// * `width` / `height` — initial surface size in device pixels.
@@ -241,7 +301,9 @@ pub unsafe extern "C" fn servo_webview_new(
             .and_then(|s| Url::parse(s).ok())
     };
 
-    let servo = ServoBuilder::default().build();
+    let servo = ServoBuilder::default()
+        .preferences(experimental_preferences())
+        .build();
 
     let delegate = Rc::new(EmbedderDelegate::new(rendering_context.clone()));
     let mut builder = WebViewBuilder::new(&servo, rendering_context.clone())
