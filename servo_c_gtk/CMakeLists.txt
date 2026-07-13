@@ -12,8 +12,21 @@ find_package(PkgConfig REQUIRED)
 # land the libraries in /usr/lib64.
 include(GNUInstallDirs)
 
+# GObject-introspection (GIR) is not available/meaningful when cross-compiling
+# for Windows with MinGW: g-ir-scanner builds and RUNS a helper against the
+# target library, which can't be executed from the cross toolchain. Default the
+# GIR build off for MinGW; it stays on for native builds. Can be overridden with
+# -DBUILD_GIR=ON/OFF.
+if(MINGW)
+    option(BUILD_GIR "Build GObject-introspection GIR/typelib" OFF)
+else()
+    option(BUILD_GIR "Build GObject-introspection GIR/typelib" ON)
+endif()
+
 pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
-pkg_check_modules(GOBJECT_INTROSPECTION REQUIRED gobject-introspection-1.0)
+if(BUILD_GIR)
+    pkg_check_modules(GOBJECT_INTROSPECTION REQUIRED gobject-introspection-1.0)
+endif()
 
 set(SERVO_GTK_API_VERSION 0.2)
 set(SERVO_GTK_NAMESPACE ServoGtk)
@@ -125,6 +138,7 @@ set_target_properties(servogtk3 PROPERTIES
         INSTALL_RPATH "$ORIGIN"
 )
 
+if(BUILD_GIR)
 # --- Introspection scanner twin -------------------------------------------
 # g-ir-scanner links a helper program against the target library and RUNS it to
 # dump GObject metadata. Linking the real servogtk3 pulls in libservoshell (the
@@ -199,6 +213,7 @@ add_custom_target(gir ALL
         ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_GIR}
         ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_TYPELIB}
 )
+endif() # BUILD_GIR
 
 install(TARGETS servogtk3
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -232,15 +247,17 @@ install(FILES servo/servo-webview.h
 # GIR/typelib are produced by g-ir-scanner against the servogtk3-scan twin (see
 # above). Kept OPTIONAL so a library install still succeeds even if the
 # introspection data was not built.
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_GIR}
-        DESTINATION share/gir-1.0
-        OPTIONAL
-)
+if(BUILD_GIR)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_GIR}
+            DESTINATION share/gir-1.0
+            OPTIONAL
+    )
 
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_TYPELIB}
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/girepository-1.0
-        OPTIONAL
-)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${SERVO_GTK_TYPELIB}
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/girepository-1.0
+            OPTIONAL
+    )
+endif()
 
 add_executable(servo-gtk-demo
         demo/servo-gtk-demo.c)
