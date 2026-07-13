@@ -79,6 +79,16 @@ void servo_webview_scroll(ServoWebViewHandle *webview, double dx, double dy)
     (void) webview; (void) dx; (void) dy;
 }
 
+void
+servo_webview_key(ServoWebViewHandle *webview,
+                  uint32_t            key,
+                  uint32_t            unicode,
+                  uint32_t            modifiers,
+                  bool                pressed)
+{
+    (void) webview; (void) key; (void) unicode; (void) modifiers; (void) pressed;
+}
+
 void servo_webview_spin(ServoWebViewHandle *webview) { (void) webview; }
 
 char *servo_webview_get_uri(ServoWebViewHandle *webview)

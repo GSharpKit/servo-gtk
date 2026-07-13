@@ -2,6 +2,8 @@
 
 #include "servo-webview.h"
 
+#include <gdk/gdkkeysyms.h>
+
 enum {
     PROP_0,
     PROP_URI,
@@ -268,6 +270,113 @@ servo_gtk_web_view_scroll(GtkWidget *widget, GdkEventScroll *event)
     return TRUE;
 }
 
+/* Translate a GDK modifier state mask to the Servo modifier bitmask. */
+static uint32_t
+servo_gtk_web_view_modifiers(guint state)
+{
+    uint32_t mods = SERVO_MODIFIER_NONE;
+
+    if (state & GDK_SHIFT_MASK) {
+        mods |= SERVO_MODIFIER_SHIFT;
+    }
+    if (state & GDK_CONTROL_MASK) {
+        mods |= SERVO_MODIFIER_CONTROL;
+    }
+    if (state & GDK_MOD1_MASK) {
+        mods |= SERVO_MODIFIER_ALT;
+    }
+    if (state & (GDK_META_MASK | GDK_SUPER_MASK)) {
+        mods |= SERVO_MODIFIER_META;
+    }
+
+    return mods;
+}
+
+/*
+ * Map a GDK keyval to a named ServoKey. Printable keys return
+ * SERVO_KEY_CHARACTER; the caller then resolves the actual character via
+ * gdk_keyval_to_unicode(). The non-printable keys handled here are intercepted
+ * before that step so their control-character Unicode values never leak through.
+ */
+static ServoKey
+servo_gtk_web_view_map_keyval(guint keyval)
+{
+    switch (keyval) {
+    case GDK_KEY_Return:
+    case GDK_KEY_KP_Enter:
+    case GDK_KEY_ISO_Enter:      return SERVO_KEY_ENTER;
+    case GDK_KEY_Tab:
+    case GDK_KEY_KP_Tab:
+    case GDK_KEY_ISO_Left_Tab:   return SERVO_KEY_TAB;
+    case GDK_KEY_BackSpace:      return SERVO_KEY_BACKSPACE;
+    case GDK_KEY_Delete:
+    case GDK_KEY_KP_Delete:      return SERVO_KEY_DELETE;
+    case GDK_KEY_Escape:         return SERVO_KEY_ESCAPE;
+    case GDK_KEY_Left:
+    case GDK_KEY_KP_Left:        return SERVO_KEY_ARROW_LEFT;
+    case GDK_KEY_Right:
+    case GDK_KEY_KP_Right:       return SERVO_KEY_ARROW_RIGHT;
+    case GDK_KEY_Up:
+    case GDK_KEY_KP_Up:          return SERVO_KEY_ARROW_UP;
+    case GDK_KEY_Down:
+    case GDK_KEY_KP_Down:        return SERVO_KEY_ARROW_DOWN;
+    case GDK_KEY_Home:
+    case GDK_KEY_KP_Home:        return SERVO_KEY_HOME;
+    case GDK_KEY_End:
+    case GDK_KEY_KP_End:         return SERVO_KEY_END;
+    case GDK_KEY_Page_Up:
+    case GDK_KEY_KP_Page_Up:     return SERVO_KEY_PAGE_UP;
+    case GDK_KEY_Page_Down:
+    case GDK_KEY_KP_Page_Down:   return SERVO_KEY_PAGE_DOWN;
+    default:                     return SERVO_KEY_CHARACTER;
+    }
+}
+
+/* Shared handler for key press (pressed = TRUE) and release (FALSE). */
+static gboolean
+servo_gtk_web_view_key(GtkWidget *widget, GdkEventKey *event, gboolean pressed)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(widget);
+
+    if (self->servo == NULL) {
+        return FALSE;
+    }
+
+    ServoKey key = servo_gtk_web_view_map_keyval(event->keyval);
+    guint32  unicode = 0;
+
+    if (key == SERVO_KEY_CHARACTER) {
+        unicode = gdk_keyval_to_unicode(event->keyval);
+        /*
+         * Bare modifiers and function keys have no Unicode mapping; report them
+         * as unidentified rather than as an empty character.
+         */
+        if (unicode == 0) {
+            key = SERVO_KEY_UNIDENTIFIED;
+        }
+    }
+
+    servo_webview_key(self->servo,
+                      (uint32_t) key,
+                      unicode,
+                      servo_gtk_web_view_modifiers(event->state),
+                      pressed);
+
+    return TRUE;
+}
+
+static gboolean
+servo_gtk_web_view_key_press(GtkWidget *widget, GdkEventKey *event)
+{
+    return servo_gtk_web_view_key(widget, event, TRUE);
+}
+
+static gboolean
+servo_gtk_web_view_key_release(GtkWidget *widget, GdkEventKey *event)
+{
+    return servo_gtk_web_view_key(widget, event, FALSE);
+}
+
 static void
 servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
 {
@@ -285,6 +394,8 @@ servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
     widget_class->button_press_event = servo_gtk_web_view_button_press;
     widget_class->button_release_event = servo_gtk_web_view_button_release;
     widget_class->scroll_event = servo_gtk_web_view_scroll;
+    widget_class->key_press_event = servo_gtk_web_view_key_press;
+    widget_class->key_release_event = servo_gtk_web_view_key_release;
 
     properties[PROP_URI] =
         g_param_spec_string(
@@ -311,6 +422,8 @@ servo_gtk_web_view_init(ServoGtkWebView *self)
         | GDK_BUTTON_RELEASE_MASK
         | GDK_SCROLL_MASK
         | GDK_SMOOTH_SCROLL_MASK
+        | GDK_KEY_PRESS_MASK
+        | GDK_KEY_RELEASE_MASK
     );
 
     self->tick_id = gtk_widget_add_tick_callback(widget, servo_gtk_web_view_tick, NULL, NULL);

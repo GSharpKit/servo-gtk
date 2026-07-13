@@ -28,9 +28,10 @@ use std::sync::Once;
 
 use euclid::Point2D;
 use servo::{
-    Cursor, DeviceIntRect, DeviceVector2D, InputEvent, MouseButton, MouseButtonAction,
-    MouseButtonEvent, MouseMoveEvent, RenderingContext, Scroll, Servo, ServoBuilder,
-    SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
+    Code, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, Key, KeyState, KeyboardEvent, Location,
+    Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
+    RenderingContext, Scroll, Servo, ServoBuilder, SoftwareRenderingContext, WebView,
+    WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
 };
 use url::Url;
 
@@ -456,6 +457,112 @@ pub unsafe extern "C" fn servo_webview_scroll(
             WebViewPoint::Device(Point2D::new(10.0, 10.0)),
         );
     }
+}
+
+/// Named-key identifiers understood by [`servo_webview_key`]. These mirror the
+/// `ServoKey` enum in `servo-webview.h` — keep the two in sync. Values other
+/// than `CHARACTER` map to a [`NamedKey`]; `CHARACTER` means "use the Unicode
+/// codepoint instead".
+mod servo_key {
+    pub const CHARACTER: u32 = 0;
+    pub const UNIDENTIFIED: u32 = 1;
+    pub const ENTER: u32 = 2;
+    pub const TAB: u32 = 3;
+    pub const BACKSPACE: u32 = 4;
+    pub const DELETE: u32 = 5;
+    pub const ESCAPE: u32 = 6;
+    pub const ARROW_LEFT: u32 = 7;
+    pub const ARROW_RIGHT: u32 = 8;
+    pub const ARROW_UP: u32 = 9;
+    pub const ARROW_DOWN: u32 = 10;
+    pub const HOME: u32 = 11;
+    pub const END: u32 = 12;
+    pub const PAGE_UP: u32 = 13;
+    pub const PAGE_DOWN: u32 = 14;
+}
+
+/// Modifier bits understood by [`servo_webview_key`]. Mirrors the
+/// `SERVO_MODIFIER_*` flags in `servo-webview.h`.
+mod servo_modifier {
+    pub const SHIFT: u32 = 1 << 0;
+    pub const CONTROL: u32 = 1 << 1;
+    pub const ALT: u32 = 1 << 2;
+    pub const META: u32 = 1 << 3;
+}
+
+/// Report a key press (`pressed == true`) or release to the webview.
+///
+/// * `key` — a `ServoKey` value. Named keys (Enter, Tab, arrows, …) map to the
+///   corresponding [`NamedKey`]; `SERVO_KEY_CHARACTER` (0) means the key
+///   produced text, carried in `unicode`.
+/// * `unicode` — the Unicode codepoint of the typed character when `key` is
+///   `SERVO_KEY_CHARACTER`, otherwise ignored (pass 0).
+/// * `modifiers` — a bitmask of `SERVO_MODIFIER_*` flags.
+///
+/// # Safety
+/// `webview` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_key(
+    webview: *mut ServoWebViewHandle,
+    key: u32,
+    unicode: u32,
+    modifiers: u32,
+    pressed: bool,
+) {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return;
+    };
+
+    let logical_key = match key {
+        servo_key::ENTER => Key::Named(NamedKey::Enter),
+        servo_key::TAB => Key::Named(NamedKey::Tab),
+        servo_key::BACKSPACE => Key::Named(NamedKey::Backspace),
+        servo_key::DELETE => Key::Named(NamedKey::Delete),
+        servo_key::ESCAPE => Key::Named(NamedKey::Escape),
+        servo_key::ARROW_LEFT => Key::Named(NamedKey::ArrowLeft),
+        servo_key::ARROW_RIGHT => Key::Named(NamedKey::ArrowRight),
+        servo_key::ARROW_UP => Key::Named(NamedKey::ArrowUp),
+        servo_key::ARROW_DOWN => Key::Named(NamedKey::ArrowDown),
+        servo_key::HOME => Key::Named(NamedKey::Home),
+        servo_key::END => Key::Named(NamedKey::End),
+        servo_key::PAGE_UP => Key::Named(NamedKey::PageUp),
+        servo_key::PAGE_DOWN => Key::Named(NamedKey::PageDown),
+        servo_key::UNIDENTIFIED => Key::Named(NamedKey::Unidentified),
+        // CHARACTER (and any unknown value) falls back to the codepoint, then
+        // to Unidentified if it isn't a valid scalar value.
+        _ => match char::from_u32(unicode) {
+            Some(c) if key == servo_key::CHARACTER => Key::Character(c.to_string()),
+            _ => Key::Named(NamedKey::Unidentified),
+        },
+    };
+
+    let mut mods = Modifiers::empty();
+    if modifiers & servo_modifier::SHIFT != 0 {
+        mods |= Modifiers::SHIFT;
+    }
+    if modifiers & servo_modifier::CONTROL != 0 {
+        mods |= Modifiers::CONTROL;
+    }
+    if modifiers & servo_modifier::ALT != 0 {
+        mods |= Modifiers::ALT;
+    }
+    if modifiers & servo_modifier::META != 0 {
+        mods |= Modifiers::META;
+    }
+
+    let state = if pressed { KeyState::Down } else { KeyState::Up };
+
+    handle
+        .webview
+        .notify_input_event(InputEvent::Keyboard(KeyboardEvent::new_without_event(
+            state,
+            logical_key,
+            Code::Unidentified,
+            Location::Standard,
+            mods,
+            false, // repeat
+            false, // is_composing
+        )));
 }
 
 /// Pump Servo's event loop once. Call this regularly from a GTK tick/timeout

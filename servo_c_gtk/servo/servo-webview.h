@@ -86,6 +86,51 @@ void servo_webview_pointer_button(ServoWebViewHandle *webview,
 void servo_webview_scroll(ServoWebViewHandle *webview, double dx, double dy);
 
 /*
+ * Named keys understood by servo_webview_key(). SERVO_KEY_CHARACTER means the
+ * key produced text — pass its Unicode codepoint in the `unicode` argument. All
+ * other values identify a non-printable key and ignore `unicode`. These values
+ * are part of the ABI; keep them in sync with the `servo_key` module in
+ * servo-webview.rs.
+ */
+typedef enum {
+    SERVO_KEY_CHARACTER = 0,
+    SERVO_KEY_UNIDENTIFIED = 1,
+    SERVO_KEY_ENTER = 2,
+    SERVO_KEY_TAB = 3,
+    SERVO_KEY_BACKSPACE = 4,
+    SERVO_KEY_DELETE = 5,
+    SERVO_KEY_ESCAPE = 6,
+    SERVO_KEY_ARROW_LEFT = 7,
+    SERVO_KEY_ARROW_RIGHT = 8,
+    SERVO_KEY_ARROW_UP = 9,
+    SERVO_KEY_ARROW_DOWN = 10,
+    SERVO_KEY_HOME = 11,
+    SERVO_KEY_END = 12,
+    SERVO_KEY_PAGE_UP = 13,
+    SERVO_KEY_PAGE_DOWN = 14
+} ServoKey;
+
+/* Modifier bitmask for servo_webview_key(). */
+typedef enum {
+    SERVO_MODIFIER_NONE    = 0,
+    SERVO_MODIFIER_SHIFT   = 1 << 0,
+    SERVO_MODIFIER_CONTROL = 1 << 1,
+    SERVO_MODIFIER_ALT     = 1 << 2,
+    SERVO_MODIFIER_META    = 1 << 3
+} ServoModifier;
+
+/*
+ * Report a key press (`pressed`) or release. `key` is a ServoKey; when it is
+ * SERVO_KEY_CHARACTER, `unicode` carries the typed character's Unicode
+ * codepoint (0 otherwise). `modifiers` is a bitmask of ServoModifier flags.
+ */
+void servo_webview_key(ServoWebViewHandle *webview,
+                       uint32_t            key,
+                       uint32_t            unicode,
+                       uint32_t            modifiers,
+                       bool                pressed);
+
+/*
  * Pump Servo's event loop once. Call regularly from a GTK tick/timeout source;
  * the frame-ready callback fires synchronously from inside this call.
  */
