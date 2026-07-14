@@ -42,6 +42,14 @@ typedef void (*ServoCursorChangedCallback)(const char *name,
                                            void       *user_data);
 
 /*
+ * Invoked when the webview navigates to a new URL (link, redirect, history
+ * traversal, or an embedder-issued load). `url` is a NUL-terminated UTF-8
+ * string valid only for the duration of the call — copy it before returning.
+ */
+typedef void (*ServoUrlChangedCallback)(const char *url,
+                                        void       *user_data);
+
+/*
  * Create a webview with an initial surface of width x height device pixels.
  * `initial_uri` is the URL to load on creation, or NULL to start on
  * about:blank. The initial URL MUST be supplied here rather than via a
@@ -64,6 +72,9 @@ void servo_webview_set_frame_ready_callback(ServoWebViewHandle     *webview,
 void servo_webview_set_cursor_changed_callback(ServoWebViewHandle        *webview,
                                                ServoCursorChangedCallback callback,
                                                void                      *user_data);
+void servo_webview_set_url_changed_callback(ServoWebViewHandle     *webview,
+                                            ServoUrlChangedCallback callback,
+                                            void                   *user_data);
 
 /* Navigation. */
 void servo_webview_load_uri(ServoWebViewHandle *webview, const char *uri);

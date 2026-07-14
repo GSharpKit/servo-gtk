@@ -49,6 +49,12 @@ pub type ServoFrameReadyCallback =
 pub type ServoCursorChangedCallback =
     extern "C" fn(name: *const c_char, user_data: *mut c_void);
 
+/// Called when the webview's URL changes — navigation, redirect, link
+/// activation or history traversal. `url` is a NUL-terminated UTF-8 string,
+/// valid only for the duration of the call; copy it before returning.
+pub type ServoUrlChangedCallback =
+    extern "C" fn(url: *const c_char, user_data: *mut c_void);
+
 struct FrameCallback {
     func: ServoFrameReadyCallback,
     user_data: *mut c_void,
@@ -59,12 +65,18 @@ struct CursorCallback {
     user_data: *mut c_void,
 }
 
-/// Servo delegate that turns presented frames and cursor changes into calls
-/// into the registered C callbacks.
+struct UrlCallback {
+    func: ServoUrlChangedCallback,
+    user_data: *mut c_void,
+}
+
+/// Servo delegate that turns presented frames, cursor changes and URL changes
+/// into calls into the registered C callbacks.
 struct EmbedderDelegate {
     rendering_context: Rc<dyn RenderingContext>,
     frame_callback: RefCell<Option<FrameCallback>>,
     cursor_callback: RefCell<Option<CursorCallback>>,
+    url_callback: RefCell<Option<UrlCallback>>,
 }
 
 impl EmbedderDelegate {
@@ -73,6 +85,7 @@ impl EmbedderDelegate {
             rendering_context,
             frame_callback: RefCell::new(None),
             cursor_callback: RefCell::new(None),
+            url_callback: RefCell::new(None),
         }
     }
 }
@@ -118,6 +131,16 @@ impl WebViewDelegate for EmbedderDelegate {
         };
         if let Ok(name) = CString::new(cursor_css_name(cursor)) {
             (cb.0)(name.as_ptr(), cb.1);
+        }
+    }
+
+    fn notify_url_changed(&self, _webview: WebView, url: Url) {
+        let Some(cb) = self.url_callback.borrow().as_ref().map(|c| (c.func, c.user_data))
+        else {
+            return;
+        };
+        if let Ok(url) = CString::new(url.as_str()) {
+            (cb.0)(url.as_ptr(), cb.1);
         }
     }
 }
@@ -371,6 +394,25 @@ pub unsafe extern "C" fn servo_webview_set_cursor_changed_callback(
     };
     *handle.delegate.cursor_callback.borrow_mut() =
         callback.map(|func| CursorCallback { func, user_data });
+}
+
+/// Register the URL-change callback, invoked whenever the webview navigates to a
+/// new URL. Pass a NULL `callback` to clear it.
+///
+/// # Safety
+/// `webview` must be a valid handle. `user_data` is stored verbatim and handed
+/// back to the callback; its lifetime is the caller's responsibility.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_set_url_changed_callback(
+    webview: *mut ServoWebViewHandle,
+    callback: Option<ServoUrlChangedCallback>,
+    user_data: *mut c_void,
+) {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return;
+    };
+    *handle.delegate.url_callback.borrow_mut() =
+        callback.map(|func| UrlCallback { func, user_data });
 }
 
 /// Begin loading `uri`. Invalid URLs are ignored.

@@ -44,6 +44,14 @@ servo_webview_set_cursor_changed_callback(ServoWebViewHandle        *webview,
     (void) webview; (void) callback; (void) user_data;
 }
 
+void
+servo_webview_set_url_changed_callback(ServoWebViewHandle     *webview,
+                                       ServoUrlChangedCallback callback,
+                                       void                   *user_data)
+{
+    (void) webview; (void) callback; (void) user_data;
+}
+
 void servo_webview_load_uri(ServoWebViewHandle *webview, const char *uri)
 {
     (void) webview; (void) uri;

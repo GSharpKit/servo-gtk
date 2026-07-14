@@ -12,6 +12,13 @@ enum {
 
 static GParamSpec *properties[N_PROPERTIES] = { NULL };
 
+enum {
+    URI_CHANGED,
+    N_SIGNALS
+};
+
+static guint signals[N_SIGNALS] = { 0 };
+
 G_DEFINE_TYPE(ServoGtkWebView, servo_gtk_web_view, GTK_TYPE_DRAWING_AREA)
 
 /* Matches GdkPixbufDestroyNotify; frees the RGBA buffer owned by the pixbuf. */
@@ -72,6 +79,27 @@ servo_gtk_web_view_on_cursor_changed(const char *name, gpointer user_data)
     if (cursor != NULL) {
         g_object_unref(cursor);
     }
+}
+
+/*
+ * Servo navigated to a new URL (link, redirect, history traversal or an
+ * embedder-issued load). Keep the "uri" property in sync and emit the
+ * "uri-changed" signal so observers can react.
+ */
+static void
+servo_gtk_web_view_on_url_changed(const char *url, gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    if (g_strcmp0(self->uri, url) == 0) {
+        return;
+    }
+
+    g_free(self->uri);
+    self->uri = g_strdup(url);
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_URI]);
+    g_signal_emit(self, signals[URI_CHANGED], 0, self->uri);
 }
 
 /* Pump Servo's event loop once per frame clock tick. */
@@ -202,6 +230,8 @@ servo_gtk_web_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation)
                 self->servo, servo_gtk_web_view_on_frame_ready, self);
             servo_webview_set_cursor_changed_callback(
                 self->servo, servo_gtk_web_view_on_cursor_changed, self);
+            servo_webview_set_url_changed_callback(
+                self->servo, servo_gtk_web_view_on_url_changed, self);
         }
     } else {
         servo_webview_resize(self->servo, width, height);
@@ -407,6 +437,27 @@ servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
         );
 
     g_object_class_install_properties(object_class, N_PROPERTIES, properties);
+
+    /**
+     * ServoGtkWebView::uri-changed:
+     * @self: the #ServoGtkWebView
+     * @uri: the new URI
+     *
+     * Emitted whenever the webview navigates to a new URL (link activation,
+     * redirect, history traversal or an embedder-issued load).
+     */
+    signals[URI_CHANGED] =
+        g_signal_new(
+            "uri-changed",
+            G_TYPE_FROM_CLASS(klass),
+            G_SIGNAL_RUN_FIRST,
+            0,          /* no class default handler */
+            NULL, NULL, /* accumulator */
+            NULL,       /* default (generic) C marshaller */
+            G_TYPE_NONE,
+            1,
+            G_TYPE_STRING
+        );
 }
 
 static void

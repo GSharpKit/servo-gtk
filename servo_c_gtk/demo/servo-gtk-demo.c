@@ -31,6 +31,21 @@ on_url_entry_activate(GtkEntry *entry, gpointer user_data)
     }
 }
 
+/* The web view navigated to a new URL: print it and reflect it in the entry. */
+static void
+on_web_view_uri_changed(ServoGtkWebView *web_view, const gchar *uri, gpointer user_data)
+{
+    GtkEntry *entry = GTK_ENTRY(user_data);
+
+    (void) web_view;
+
+    g_print("URL changed: %s\n", uri != NULL ? uri : "(null)");
+
+    if (uri != NULL) {
+        gtk_entry_set_text(entry, uri);
+    }
+}
+
 static void
 activate(GtkApplication *app, gpointer user_data)
 {
@@ -74,6 +89,9 @@ activate(GtkApplication *app, gpointer user_data)
     gtk_widget_set_margin_bottom(url_entry, 12);
     g_signal_connect(url_entry, "activate", G_CALLBACK(on_url_entry_activate), web_view);
     gtk_box_pack_start(GTK_BOX(box), url_entry, FALSE, FALSE, 0);
+
+    /* Print and reflect URL changes reported by Servo (navigation, redirects). */
+    g_signal_connect(web_view, "uri-changed", G_CALLBACK(on_web_view_uri_changed), url_entry);
 
     gtk_box_pack_start(GTK_BOX(box), web_view, TRUE, TRUE, 0);
 
