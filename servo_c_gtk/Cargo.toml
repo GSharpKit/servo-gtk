@@ -25,9 +25,23 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemalloc-sys = { version = "0.6.1", features = ["disable_initial_exec_tls"] }
 
-# [dependencies.tikv-jemalloc-sys]
-# version = "0.6.1"
-# features = ["disable_initial_exec_tls"]
+# On Windows, native WGL/OpenGL is unreliable, so drive Servo through ANGLE
+# (OpenGL ES over Direct3D 11 / EGL). We flip ONLY surfman's default connection to
+# ANGLE via `sm-angle-default`; feature unification makes every surfman user in
+# the graph (paint_api, webgl, …) default to the EGL/ANGLE backend.
+#
+# We deliberately do NOT enable Servo's `no-wgl` feature: besides the surfman
+# switch, it turns on `mozangle/build_dlls`, which compiles ANGLE from source by
+# shelling out to clang-cl — and that build breaks under cargo-xwin cross
+# compilation ("cannot specify '/Fo…out\' when compiling multiple source files").
+# `sm-angle-default` alone does NOT pull surfman's optional mozangle dep (only
+# `sm-angle-builtin` does), so mozangle stays translator-only and builds cleanly.
+#
+# Consequence: surfman loads `libEGL.dll` / `libGLESv2.dll` at runtime via
+# LoadLibrary. Ship prebuilt ANGLE DLLs next to libservoshell.dll.
+[target.'cfg(windows)'.dependencies]
+surfman = { version = "0.12.3", features = ["sm-angle-default"] }
+# windows-sys = { version = "0.60.2", features = ["Win32_Graphics_OpenGL"] }
 
 [build-dependencies]
 glib-build-tools = "0.22"
