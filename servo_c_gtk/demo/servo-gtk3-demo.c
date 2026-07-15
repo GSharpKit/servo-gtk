@@ -3,7 +3,7 @@
 //
 #include <gtk/gtk.h>
 
-#include "servo-gtk-web-view.h"
+#include "servo-gtk3-view.h"
 
 /* Navigate the web view to the URL typed in the entry (Enter pressed). */
 static void

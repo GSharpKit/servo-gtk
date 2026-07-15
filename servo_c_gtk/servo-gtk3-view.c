@@ -1,4 +1,4 @@
-#include "servo-gtk-web-view.h"
+#include "servo-gtk3-view.h"
 
 #include "servo-webview.h"
 

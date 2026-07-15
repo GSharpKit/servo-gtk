@@ -39,11 +39,11 @@ set(SERVO_GTK_GIR ${SERVO_GTK_NAMESPACE}-${SERVO_GTK_API_VERSION}.gir)
 set(SERVO_GTK_TYPELIB ${SERVO_GTK_NAMESPACE}-${SERVO_GTK_API_VERSION}.typelib)
 
 set(SERVO_GTK_PUBLIC_HEADERS
-        servo-gtk-web-view.h
+        servo-gtk3-view.h
 )
 
 set(SERVO_GTK_SOURCES
-        servo-gtk-web-view.c
+        servo-gtk3-view.c
 )
 
 add_library(servogtk3 SHARED
@@ -318,29 +318,29 @@ if(BUILD_GIR)
     )
 endif()
 
-add_executable(servo-gtk-demo
-        demo/servo-gtk-demo.c)
+add_executable(servo-gtk3-demo
+        demo/servo-gtk3-demo.c)
 
-target_include_directories(servo-gtk-demo
+target_include_directories(servo-gtk3-demo
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${GTK3_INCLUDE_DIRS})
 
-target_compile_options(servo-gtk-demo
+target_compile_options(servo-gtk3-demo
         PRIVATE
         ${GTK3_CFLAGS_OTHER})
 
-target_link_libraries(servo-gtk-demo
+target_link_libraries(servo-gtk3-demo
         PRIVATE
         servogtk3
         ${GTK3_LIBRARIES})
 
 # Installed to <prefix>/bin, it finds servogtk3 + libservoshll in the install libdir
 # via a relative rpath.
-set_target_properties(servo-gtk-demo PROPERTIES
+set_target_properties(servo-gtk3-demo PROPERTIES
         INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
 )
 
-install(TARGETS servo-gtk-demo
+install(TARGETS servo-gtk3-demo
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

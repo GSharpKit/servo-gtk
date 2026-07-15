@@ -10,7 +10,7 @@
  * Introspection never instantiates a ServoGtkWebView; it only reads the
  * GObject type/properties/signals registered in class_init, none of which call
  * these functions. So the scanner links against a twin of the library built
- * from servo-gtk-web-view.c plus these no-op stubs, with no dependency on
+ * from servo-gtk3-view.c plus these no-op stubs, with no dependency on
  * libservoshell. See the `servogtk3-scan` target in CMakeLists.txt.
  *
  * This file is NEVER part of the real runtime library.
