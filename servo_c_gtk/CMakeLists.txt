@@ -166,11 +166,12 @@ endif()
 #   MAJOR       - GTK major version, e.g. 3 or 4 (names all outputs).
 #   API_VERSION - GIR nsversion, e.g. 3.0 or 4.0.
 #   GTK_PREFIX  - pkg_check_modules prefix to read flags from (GTK3 / GTK4).
+#   GTK_PKG     - GTK pkg-config module name (gtk+-3.0 / gtk4), for the .pc Requires.
 #   GIR_INCLUDE - GObject-introspection dependency, e.g. Gtk-3.0 / Gtk-4.0.
 #   SOURCES     - C source files.
 #   HEADERS     - public C headers.
 function(add_servo_gtk_library)
-    set(oneValueArgs MAJOR API_VERSION GTK_PREFIX GIR_INCLUDE)
+    set(oneValueArgs MAJOR API_VERSION GTK_PREFIX GTK_PKG GIR_INCLUDE)
     set(multiValueArgs SOURCES HEADERS)
     cmake_parse_arguments(ARG "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
@@ -318,6 +319,22 @@ function(add_servo_gtk_library)
             DESTINATION include/${lib}
     )
 
+    # pkg-config file (servogtk3.pc / servogtk4.pc). GTK is a public dependency
+    # (the headers include <gtk/gtk.h> and the widget derives GtkDrawingArea), so
+    # it goes in Requires. libservoshell is pulled in transitively via the
+    # library's NEEDED entry, so consumers only link -l${lib}.
+    set(PC_LIB ${lib})
+    set(PC_MAJOR ${ARG_MAJOR})
+    set(PC_GTK_PKG ${ARG_GTK_PKG})
+    configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/servogtk.pc.in
+            ${CMAKE_CURRENT_BINARY_DIR}/${lib}.pc
+            @ONLY
+    )
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${lib}.pc
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+    )
+
     # GIR/typelib are produced by g-ir-scanner against the scanner twin (see
     # above). Kept OPTIONAL so a library install still succeeds even if the
     # introspection data was not built.
@@ -366,6 +383,7 @@ add_servo_gtk_library(
         MAJOR       3
         API_VERSION 3.0
         GTK_PREFIX  GTK3
+        GTK_PKG     gtk+-3.0
         GIR_INCLUDE Gtk-3.0
         SOURCES     servo-gtk3-view.c
         HEADERS     servo-gtk3-view.h
@@ -375,6 +393,7 @@ add_servo_gtk_library(
         MAJOR       4
         API_VERSION 4.0
         GTK_PREFIX  GTK4
+        GTK_PKG     gtk4
         GIR_INCLUDE Gtk-4.0
         SOURCES     servo-gtk4-view.c
         HEADERS     servo-gtk4-view.h

@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=@CMAKE_INSTALL_FULL_LIBDIR@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: @PC_LIB@
+Description: Servo web view widget for GTK@PC_MAJOR@
+Version: @SERVO_VERSION@
+Requires: @PC_GTK_PKG@
+Libs: -L${libdir} -l@PC_LIB@
+Cflags: -I${includedir}/@PC_LIB@
