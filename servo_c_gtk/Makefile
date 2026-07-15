@@ -1,8 +1,10 @@
-all: build-release
+all: build-release-linux build-release-mingw
+
+linux: build-release-linux
 
 mingw: build-release-mingw
 
-build-release: Cargo.lock
+build-release-linux: Cargo.lock
 	cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release
 	#cmake --build cmake-build-release --config Release
 	ninja -C cmake-build-release -vv
@@ -11,7 +13,9 @@ build-release-mingw: Cargo.lock
 	mingw64-cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release-mingw
 	ninja -C cmake-build-release-mingw -vv
 
-install:
+install: install-linux install-mingw
+
+install-linux:
 	sudo cmake --install cmake-build-release --prefix /usr
 
 install-mingw:

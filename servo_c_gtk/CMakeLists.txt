@@ -28,7 +28,12 @@ if(BUILD_GIR)
     pkg_check_modules(GOBJECT_INTROSPECTION REQUIRED gobject-introspection-1.0)
 endif()
 
-set(SERVO_GTK_API_VERSION 0.2)
+# Library version (full VERSION x.y.z) and ABI major (SOVERSION). These drive
+# servogtk3's VERSION/SOVERSION and the libservoshell.so symlink chain below.
+set(SERVO_VERSION 0.3.0)
+set(SERVO_SOVERSION 0)
+
+set(SERVO_GTK_API_VERSION 3.0)
 set(SERVO_GTK_NAMESPACE ServoGtk)
 set(SERVO_GTK_GIR ${SERVO_GTK_NAMESPACE}-${SERVO_GTK_API_VERSION}.gir)
 set(SERVO_GTK_TYPELIB ${SERVO_GTK_NAMESPACE}-${SERVO_GTK_API_VERSION}.typelib)
@@ -128,26 +133,27 @@ if(WIN32)
 else()
     # The crate is presented as "libservoshell". Cargo still emits libservoshell.so
     # (the crate can't be named `servo` without colliding with its `servo`
-    # dependency), but build.rs stamps it with soname libservoshell.so.0, and we lay
-    # down the versioned libservoshell.so.0.3.0 / libservoshell.so.0 / libservoshell.so
-    # symlinks next to it. These names mirror servogtk3's VERSION/SOVERSION below.
+    # dependency), but build.rs stamps it with soname libservoshell.so.${SERVO_SOVERSION},
+    # and we lay down the versioned libservoshell.so.${SERVO_VERSION} /
+    # libservoshell.so.${SERVO_SOVERSION} / libservoshell.so symlinks next to it. These
+    # names mirror servogtk3's VERSION/SOVERSION below.
     set(CARGO_OUTPUT
             ${SERVO_OUTPUT_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}libservoshell${CMAKE_SHARED_LIBRARY_SUFFIX}
     )
     # Real, versioned file (dereferenced on install) and the soname/dev symlinks.
-    set(SERVO_REAL  ${SERVO_OUTPUT_DIR}/libservoshell.so.0.3.0)
-    set(SERVO_SONAME ${SERVO_OUTPUT_DIR}/libservoshell.so.0)
+    set(SERVO_REAL  ${SERVO_OUTPUT_DIR}/libservoshell.so.${SERVO_VERSION})
+    set(SERVO_SONAME ${SERVO_OUTPUT_DIR}/libservoshell.so.${SERVO_SOVERSION})
     set(SERVO_LINK  ${SERVO_OUTPUT_DIR}/libservoshell.so)
 
-    # Build the cdylib, then create the libservoshell.so{,.0,.0.3.0} symlink chain in
-    # the Cargo output dir (relative targets keep the chain valid after install too).
+    # Build the cdylib, then create the libservoshell.so symlink chain in the Cargo
+    # output dir (relative targets keep the chain valid after install too).
     add_custom_command(
             OUTPUT ${CARGO_OUTPUT} ${SERVO_REAL} ${SERVO_SONAME} ${SERVO_LINK}
             COMMAND ${RUSTUP_EXECUTABLE} run nightly cargo build ${CARGO_BUILD_FLAGS}
             COMMAND ${CMAKE_COMMAND} -E create_symlink
-                    ${CMAKE_SHARED_LIBRARY_PREFIX}libservoshell${CMAKE_SHARED_LIBRARY_SUFFIX} libservoshell.so.0.3.0
-            COMMAND ${CMAKE_COMMAND} -E create_symlink libservoshell.so.0.3.0 libservoshell.so.0
-            COMMAND ${CMAKE_COMMAND} -E create_symlink libservoshell.so.0 libservoshell.so
+                    ${CMAKE_SHARED_LIBRARY_PREFIX}libservoshell${CMAKE_SHARED_LIBRARY_SUFFIX} libservoshell.so.${SERVO_VERSION}
+            COMMAND ${CMAKE_COMMAND} -E create_symlink libservoshell.so.${SERVO_VERSION} libservoshell.so.${SERVO_SOVERSION}
+            COMMAND ${CMAKE_COMMAND} -E create_symlink libservoshell.so.${SERVO_SOVERSION} libservoshell.so
             WORKING_DIRECTORY ${SERVO_OUTPUT_DIR}
             DEPENDS ${CARGO_DEPENDS}
             COMMENT "Building Rust Servo wrapper (cargo build ${CARGO_BUILD_FLAGS}) + libservoshell symlinks"
@@ -176,8 +182,8 @@ target_link_libraries(servogtk3
 
 set_target_properties(servogtk3 PROPERTIES
         OUTPUT_NAME "servogtk3"
-        VERSION 0.3.0
-        SOVERSION 0
+        VERSION ${SERVO_VERSION}
+        SOVERSION ${SERVO_SOVERSION}
         # The installed library finds libservoshell.so.0 next to it in the install
         # libdir. The build tree keeps its own RUNPATH (target/<profile>).
         INSTALL_RPATH "$ORIGIN"
@@ -216,8 +222,8 @@ target_link_libraries(servogtk3-scan PRIVATE ${GTK3_LIBRARIES})
 set(SERVO_GTK_SCAN_DIR ${CMAKE_CURRENT_BINARY_DIR}/scan)
 set_target_properties(servogtk3-scan PROPERTIES
         OUTPUT_NAME servogtk3
-        VERSION 0.3.0
-        SOVERSION 0
+        VERSION ${SERVO_VERSION}
+        SOVERSION ${SERVO_SOVERSION}
         LIBRARY_OUTPUT_DIRECTORY ${SERVO_GTK_SCAN_DIR}
 )
 
@@ -280,11 +286,11 @@ else()
     # install tree — the same layout CMake would generate for a versioned library.
     install(FILES ${CARGO_OUTPUT}
             DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            RENAME libservoshell.so.0.3.0
+            RENAME libservoshell.so.${SERVO_VERSION}
     )
     install(CODE "
-        file(CREATE_LINK libservoshell.so.0.3.0 \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libservoshell.so.0\" SYMBOLIC)
-        file(CREATE_LINK libservoshell.so.0     \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libservoshell.so\"   SYMBOLIC)
+        file(CREATE_LINK libservoshell.so.${SERVO_VERSION} \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libservoshell.so.${SERVO_SOVERSION}\" SYMBOLIC)
+        file(CREATE_LINK libservoshell.so.${SERVO_SOVERSION}     \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libservoshell.so\"   SYMBOLIC)
     ")
 endif()
 
