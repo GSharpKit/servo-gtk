@@ -16,10 +16,10 @@ build-release-mingw: Cargo.lock
 install: install-linux install-mingw
 
 install-linux:
-	sudo cmake --install cmake-build-release --prefix /usr
+	cmake --install cmake-build-release --prefix ${PREFIX}/usr
 
 install-mingw:
-	sudo cmake --install cmake-build-release-mingw
+	cmake --install cmake-build-release-mingw --prefix ${PREFIX}/usr/x86_64-w64-mingw32/sys-root/mingw/
 
 Cargo.lock: Cargo.lock
 	cargo generate-lockfile
