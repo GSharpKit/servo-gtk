@@ -106,3 +106,12 @@ char *servo_webview_get_uri(ServoWebViewHandle *webview)
 }
 
 void servo_string_free(char *string) { (void) string; }
+
+void
+servo_webview_evaluate_script(ServoWebViewHandle       *webview,
+                              const char               *script,
+                              ServoScriptResultCallback callback,
+                              void                     *user_data)
+{
+    (void) webview; (void) script; (void) callback; (void) user_data;
+}

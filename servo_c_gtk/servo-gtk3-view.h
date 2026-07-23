@@ -79,7 +79,18 @@ void servo_gtk_web_view_load_uri(ServoGtkWebView *self, const gchar *uri);
  */
 const gchar *servo_gtk_web_view_get_uri(ServoGtkWebView *self);
 
-
+/**
+ * ServoGtkScriptResultCallback:
+ * @web_view: the #ServoGtkWebView the script ran in
+ * @result_json: (nullable): the script's return value serialized as a JSON
+ *   string, or %NULL if evaluation failed
+ * @error: (nullable): a human-readable error message, or %NULL on success
+ * @user_data: the user data passed to servo_gtk_web_view_evaluate_script()
+ *
+ * Invoked exactly once when an asynchronous script evaluation finishes.
+ * Exactly one of @result_json and @error is non-%NULL. Both strings are only
+ * valid for the duration of the call.
+ */
 typedef void (*ServoGtkScriptResultCallback) (
     ServoGtkWebView *web_view,
     const gchar     *result_json,
@@ -87,6 +98,18 @@ typedef void (*ServoGtkScriptResultCallback) (
     gpointer         user_data
 );
 
+/**
+ * servo_gtk_web_view_evaluate_script:
+ * @self: a #ServoGtkWebView
+ * @script: the JavaScript source to evaluate
+ * @callback: (scope async) (closure user_data): callback invoked once with
+ *   the result
+ * @user_data: user data passed to @callback
+ *
+ * Asynchronously evaluates @script in the web view's top-level browsing
+ * context. When evaluation finishes @callback is invoked exactly once, later,
+ * from the GTK main loop.
+ */
 void servo_gtk_web_view_evaluate_script(
     ServoGtkWebView                  *self,
     const gchar                      *script,
