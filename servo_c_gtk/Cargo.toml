@@ -9,7 +9,7 @@ name = "libservoshell"
 path = "servo/servo-webview.rs"
 
 [dependencies]
-servo = "0.3.0"
+servo = { version = "0.3.0", default-features = true, features = ["gstreamer", "media-gstreamer", "servo-media-gstreamer"] }
 # Versions pinned to whatever `servo` resolves to, so the euclid/dpi/url types
 # unify with Servo's own (a mismatched copy would be a distinct, incompatible type).
 euclid = "0.22"

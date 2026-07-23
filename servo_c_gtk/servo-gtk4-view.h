@@ -41,7 +41,8 @@ struct _ServoGtkWebViewClass {
     GtkDrawingAreaClass parent_class;
 
     /* Signals */
-    //void (*group_changed) (GtkRadioButton *radio_button);
+    void (*uri_changed) (ServoGtkWebView *web_view,
+                         const gchar     *uri);
 
     /* Padding for future expansion */
     void (*_gtk_reserved1) (void);

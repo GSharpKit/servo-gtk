@@ -451,7 +451,7 @@ servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
             "uri-changed",
             G_TYPE_FROM_CLASS(klass),
             G_SIGNAL_RUN_FIRST,
-            0,          /* no class default handler */
+            G_STRUCT_OFFSET(ServoGtkWebViewClass, uri_changed),
             NULL, NULL, /* accumulator */
             NULL,       /* default (generic) C marshaller */
             G_TYPE_NONE,
