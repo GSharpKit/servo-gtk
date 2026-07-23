@@ -79,6 +79,21 @@ void servo_gtk_web_view_load_uri(ServoGtkWebView *self, const gchar *uri);
  */
 const gchar *servo_gtk_web_view_get_uri(ServoGtkWebView *self);
 
+
+typedef void (*ServoGtkScriptResultCallback) (
+    ServoGtkWebView *web_view,
+    const gchar     *result_json,
+    const gchar     *error,
+    gpointer         user_data
+);
+
+void servo_gtk_web_view_evaluate_script(
+    ServoGtkWebView                  *self,
+    const gchar                      *script,
+    ServoGtkScriptResultCallback      callback,
+    gpointer                          user_data
+);
+
 G_END_DECLS
 
 #endif /* SERVO_GTK4_VIEW_H */

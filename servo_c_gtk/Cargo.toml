@@ -16,6 +16,9 @@ euclid = "0.22"
 dpi = "0.1"
 url = "2.5"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+# Used to render the serde-serializable `JSValue` returned by evaluate_javascript
+# into a plain JSON string for the C callback. Pinned to whatever `servo` resolves.
+serde_json = "1.0"
 
 # jemalloc must NOT use the initial-exec TLS model, or the baked engine overflows
 # the static TLS block when the .so is dlopen'd after startup (e.g. .NET P/Invoke /

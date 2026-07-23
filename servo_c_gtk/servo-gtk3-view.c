@@ -513,3 +513,64 @@ servo_gtk_web_view_get_uri(ServoGtkWebView *self)
 
     return self->uri;
 }
+
+/*
+ * One-shot context bridging the Servo FFI callback (which only knows a
+ * user_data pointer) back to the public GTK callback (which also receives the
+ * originating web view). Heap-allocated because Servo delivers the result
+ * asynchronously, from a later servo_webview_spin().
+ */
+typedef struct {
+    ServoGtkWebView              *web_view;
+    ServoGtkScriptResultCallback  callback;
+    gpointer                      user_data;
+} ScriptResultClosure;
+
+/*
+ * Trampoline matching ServoScriptResultCallback. Forwards the result (or
+ * error) to the user callback, then releases the closure and the reference it
+ * held on the web view. Invoked exactly once per evaluate call.
+ */
+static void
+servo_gtk_web_view_on_script_result(const char *result_json,
+                                    const char *error,
+                                    void       *user_data)
+{
+    ScriptResultClosure *closure = user_data;
+
+    closure->callback(closure->web_view, result_json, error, closure->user_data);
+
+    g_object_unref(closure->web_view);
+    g_free(closure);
+}
+
+void
+servo_gtk_web_view_evaluate_script(ServoGtkWebView              *self,
+                                   const gchar                  *script,
+                                   ServoGtkScriptResultCallback  callback,
+                                   gpointer                      user_data)
+{
+    g_return_if_fail(SERVO_GTK_IS_WEB_VIEW(self));
+
+    if (callback == NULL) {
+        return;
+    }
+
+    /* Servo is created lazily on the first size allocation; without it there is
+     * no browsing context to run the script in. */
+    if (self->servo == NULL) {
+        callback(self, NULL, "web view is not realized yet", user_data);
+        return;
+    }
+
+    /* Keep the web view alive until the (asynchronous) result arrives. */
+    ScriptResultClosure *closure = g_new0(ScriptResultClosure, 1);
+    closure->web_view  = g_object_ref(self);
+    closure->callback  = callback;
+    closure->user_data = user_data;
+
+    servo_webview_evaluate_script(self->servo,
+                                  script,
+                                  servo_gtk_web_view_on_script_result,
+                                  closure);
+}

@@ -28,10 +28,11 @@ use std::sync::Once;
 
 use euclid::Point2D;
 use servo::{
-    Code, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, Key, KeyState, KeyboardEvent, Location,
-    Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
-    PrefValue, Preferences, RenderingContext, Scroll, Servo, ServoBuilder, SoftwareRenderingContext,
-    WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
+    Code, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, JSValue, JavaScriptEvaluationError,
+    Key, KeyState, KeyboardEvent, Location, Modifiers, MouseButton, MouseButtonAction,
+    MouseButtonEvent, MouseMoveEvent, NamedKey, PrefValue, Preferences, RenderingContext, Scroll,
+    Servo, ServoBuilder, SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate,
+    WebViewPoint, WebViewVector,
 };
 use url::Url;
 
@@ -713,4 +714,137 @@ pub unsafe extern "C" fn servo_string_free(string: *mut c_char) {
     if !string.is_null() {
         drop(unsafe { CString::from_raw(string) });
     }
+}
+
+/// Called once when an [`servo_webview_evaluate_script`] evaluation finishes.
+///
+/// Exactly one of `result_json` / `error` is non-NULL: on success `result_json`
+/// is the return value serialized as a JSON string, on failure `error` is a
+/// human-readable message. Both pointers are valid only for the duration of the
+/// call — copy anything you need before returning.
+pub type ServoScriptResultCallback = extern "C" fn(
+    result_json: *const c_char,
+    error: *const c_char,
+    user_data: *mut c_void,
+);
+
+/// Convert Servo's [`JSValue`] into a plain [`serde_json::Value`].
+///
+/// `JSValue` derives serde `Serialize`, but that produces an externally-tagged
+/// encoding (e.g. `{"Number":3.0}`); the C side wants the natural JSON shape
+/// (`3`, `"foo"`, `[…]`), so map the variants explicitly. Node-reference
+/// variants (Element, ShadowRoot, …) carry an opaque id string and are surfaced
+/// as that string.
+fn jsvalue_to_json(value: &JSValue) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        JSValue::Undefined | JSValue::Null => Value::Null,
+        JSValue::Boolean(b) => Value::Bool(*b),
+        JSValue::Number(n) => serde_json::Number::from_f64(*n)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        JSValue::String(s)
+        | JSValue::Element(s)
+        | JSValue::ShadowRoot(s)
+        | JSValue::Frame(s)
+        | JSValue::Window(s) => Value::String(s.clone()),
+        JSValue::Array(items) => Value::Array(items.iter().map(jsvalue_to_json).collect()),
+        JSValue::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), jsvalue_to_json(v)))
+                .collect(),
+        ),
+    }
+}
+
+/// A human-readable, one-line message for a [`JavaScriptEvaluationError`].
+fn javascript_error_message(error: &JavaScriptEvaluationError) -> String {
+    match error {
+        JavaScriptEvaluationError::DocumentNotFound => {
+            "the document that would run the script no longer exists".to_string()
+        }
+        JavaScriptEvaluationError::CompilationFailure => {
+            "the script could not be compiled".to_string()
+        }
+        JavaScriptEvaluationError::EvaluationFailure(info) => match info {
+            Some(info) => format!("uncaught exception: {}", info.message),
+            None => "the script threw an uncaught exception".to_string(),
+        },
+        JavaScriptEvaluationError::InternalError => "internal Servo error".to_string(),
+        JavaScriptEvaluationError::WebViewNotReady => "the web view is not ready".to_string(),
+        JavaScriptEvaluationError::SerializationError(_) => {
+            "the result could not be serialized".to_string()
+        }
+    }
+}
+
+/// Evaluate `script` as JavaScript in the webview's top-level browsing context.
+///
+/// Evaluation is asynchronous: `callback` is invoked exactly once, later, from
+/// inside a [`servo_webview_spin`] call on the same thread. On success it
+/// receives the return value serialized as a JSON string; on failure it
+/// receives an error message. `user_data` is passed back verbatim. A NULL
+/// `callback` is a no-op.
+///
+/// # Safety
+/// `webview` must be a valid handle and `script` a valid NUL-terminated C
+/// string. `user_data` is stored verbatim and handed back to the callback; the
+/// caller owns its lifetime and must keep it valid until the callback fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_evaluate_script(
+    webview: *mut ServoWebViewHandle,
+    script: *const c_char,
+    callback: Option<ServoScriptResultCallback>,
+    user_data: *mut c_void,
+) {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return;
+    };
+
+    let Some(callback) = callback else {
+        return;
+    };
+
+    if script.is_null() {
+        let error = CString::new("script is NULL").unwrap();
+        callback(ptr::null(), error.as_ptr(), user_data);
+        return;
+    }
+
+    let script = match unsafe { CStr::from_ptr(script) }.to_str() {
+        Ok(script) => script,
+        Err(_) => {
+            let error = CString::new("script is not valid UTF-8").unwrap();
+            callback(ptr::null(), error.as_ptr(), user_data);
+            return;
+        }
+    };
+
+    // `evaluate_javascript` converts the &str to an owned String synchronously
+    // (before returning), so the borrow does not need to outlive this call. The
+    // result closure is 'static and captures only the C function pointer and the
+    // opaque user_data; it fires from a later spin_event_loop() on this thread.
+    handle.webview.evaluate_javascript(script, move |result| {
+        match result {
+            Ok(value) => {
+                let json = serde_json::to_string(&jsvalue_to_json(&value))
+                    .unwrap_or_else(|_| "null".to_string());
+                match CString::new(json) {
+                    Ok(json) => callback(json.as_ptr(), ptr::null(), user_data),
+                    Err(_) => {
+                        // A NUL byte in the JSON (only possible inside a string
+                        // value) can't be passed as a C string; report it.
+                        let error =
+                            CString::new("result contained an interior NUL byte").unwrap();
+                        callback(ptr::null(), error.as_ptr(), user_data);
+                    }
+                }
+            }
+            Err(err) => {
+                let error = CString::new(javascript_error_message(&err))
+                    .unwrap_or_else(|_| CString::new("JavaScript evaluation failed").unwrap());
+                callback(ptr::null(), error.as_ptr(), user_data);
+            }
+        }
+    });
 }

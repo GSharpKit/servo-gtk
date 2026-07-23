@@ -156,6 +156,16 @@ char *servo_webview_get_uri(ServoWebViewHandle *webview);
 /* Free a string returned by this library. NULL is a no-op. */
 void servo_string_free(char *string);
 
+
+typedef void (*ServoScriptResultCallback)(const char *result_json,
+                                          const char *error,
+                                          void       *user_data);
+
+void servo_webview_evaluate_script(ServoWebViewHandle        *webview,
+                                   const char                *script,
+                                   ServoScriptResultCallback  callback,
+                                   void                      *user_data);
+
 #ifdef __cplusplus
 }
 #endif
