@@ -7,10 +7,6 @@ edition = "2024"
 name = "servo_gtk"
 path = "servo_gtk/lib.rs"
 
-[[bin]]
-name = "servo-runner"
-path = "servo_runner/runner.rs"
-
 [[example]]
 name = "browser"
 path = "examples/browser.rs"
@@ -18,9 +14,9 @@ path = "examples/browser.rs"
 [dependencies]
 gio = "0.22"
 glib = { version = "0.22", features = ["v2_74", "log_macros"] }
-gtk = { package="gtk4", version="0.11" }
-servo = { git = "https://github.com/servo/servo.git", rev = "8d153761f9f538c4f8642d20c63fcd677b476e9a" }
-servo-embedder-traits = { git = "https://github.com/servo/servo.git", rev = "8d153761f9f538c4f8642d20c63fcd677b476e9a" }
+gtk = { package="gtk4", version="0.11", features=["v4_10"] }
+servo = { git = "https://github.com/servo/servo.git", rev = "e8dbc1dfbf6f58621346a5f61ab7a17d01387873" }
+servo-embedder-traits = { git = "https://github.com/servo/servo.git", rev = "e8dbc1dfbf6f58621346a5f61ab7a17d01387873" }
 surfman = { version = "0.9", features = ["chains", "sm-angle", "sm-angle-default"] }
 gl = "0.14.0"
 epoxy = "0.1.0"
@@ -37,5 +33,4 @@ prost = "0.13"
 bytes = "1.0"
 
 [build-dependencies]
-glib-build-tools = "0.22"
 prost-build = "0.13"

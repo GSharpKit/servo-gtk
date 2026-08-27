@@ -2,12 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! Servo runner subprocess entry point.
+//!
+//! The runner is not a separately installed binary. Instead, the library
+//! re-executes the consuming application's own executable with a marker
+//! argument (see [`RUNNER_ARG`]). The consumer is responsible for calling
+//! [`run_if_requested`] at the very start of its `main()` so that, when the
+//! process was spawned as a runner, control is handed off here and never
+//! returns to the normal application startup path.
+
 use std::io::{self, Read, Write};
 use std::rc::Rc;
 
 use core::time::Duration;
 use dpi::PhysicalSize;
-use embedder_traits::{WebViewPoint, WebViewVector, resources};
+use embedder_traits::{WebViewPoint, WebViewVector};
 use euclid::Point2D;
 use keyboard_types::{Code, Key, KeyState, Location, Modifiers, NamedKey};
 
@@ -22,13 +31,42 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 use url::Url;
 
-use servo_gtk::proto_ipc::{
+use crate::proto_ipc::{
     CursorChanged, FrameReady, LogLevel, LogMessage, ServoAction, ServoEvent, servo_action,
     servo_event,
 };
 
-mod resource_reader;
-use resource_reader::ResourceReaderInstance;
+/// Marker argument used to signal that the process should run as a Servo
+/// runner subprocess rather than as the host application.
+pub const RUNNER_ARG: &str = "--servo-gtk-runner";
+
+/// If the current process was spawned as a Servo runner (i.e. its arguments
+/// contain [`RUNNER_ARG`]), run the runner loop and terminate the process,
+/// never returning. Otherwise, return immediately so normal application
+/// startup can proceed.
+///
+/// Consumers MUST call this as the very first thing in `main()`:
+///
+/// ```ignore
+/// fn main() {
+///     servo_gtk::run_as_runner_if_requested();
+///     // ... normal application startup ...
+/// }
+/// ```
+pub fn run_if_requested() {
+    // Only consider arguments before a `--` separator: by convention anything
+    // after `--` is positional/escaped and must not be interpreted as an
+    // option. The library always passes `RUNNER_ARG` as a regular argument
+    // when spawning, so it will always appear before any `--`.
+    let is_runner = std::env::args()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == RUNNER_ARG);
+    if is_runner {
+        run();
+        std::process::exit(0);
+    }
+}
 
 struct EventLogger {
     sender: std::sync::mpsc::Sender<LogMessage>,
@@ -185,12 +223,12 @@ fn spawn_stdin_channel() -> Receiver<ServoAction> {
     rx
 }
 
-fn convert_location(proto_location: servo_gtk::proto_ipc::Location) -> Location {
+fn convert_location(proto_location: crate::proto_ipc::Location) -> Location {
     match proto_location {
-        servo_gtk::proto_ipc::Location::Standard => Location::Standard,
-        servo_gtk::proto_ipc::Location::Left => Location::Left,
-        servo_gtk::proto_ipc::Location::Right => Location::Right,
-        servo_gtk::proto_ipc::Location::Numpad => Location::Numpad,
+        crate::proto_ipc::Location::Standard => Location::Standard,
+        crate::proto_ipc::Location::Left => Location::Left,
+        crate::proto_ipc::Location::Right => Location::Right,
+        crate::proto_ipc::Location::Numpad => Location::Numpad,
     }
 }
 
@@ -202,17 +240,17 @@ fn convert_key_event(
     modifiers: u32,
     state: KeyState,
 ) -> KeyboardEvent {
-    let key = match servo_gtk::proto_ipc::KeyType::try_from(key_type)
-        .unwrap_or(servo_gtk::proto_ipc::KeyType::Character)
+    let key = match crate::proto_ipc::KeyType::try_from(key_type)
+        .unwrap_or(crate::proto_ipc::KeyType::Character)
     {
-        servo_gtk::proto_ipc::KeyType::Character => Key::Character(key_str),
-        servo_gtk::proto_ipc::KeyType::Named => {
+        crate::proto_ipc::KeyType::Character => Key::Character(key_str),
+        crate::proto_ipc::KeyType::Named => {
             Key::Named(NamedKey::from_str(&key_str).unwrap_or(NamedKey::Unidentified))
         }
     };
     let location = convert_location(
-        servo_gtk::proto_ipc::Location::try_from(location)
-            .unwrap_or(servo_gtk::proto_ipc::Location::Standard),
+        crate::proto_ipc::Location::try_from(location)
+            .unwrap_or(crate::proto_ipc::Location::Standard),
     );
     let modifiers = Modifiers::from_bits_truncate(modifiers);
     // TODO: Convert key_code to proper Code enum value
@@ -221,14 +259,15 @@ fn convert_key_event(
     KeyboardEvent::new_without_event(state, key, code, location, modifiers, false, false)
 }
 
-fn main() {
+/// Run the Servo runner event loop. This blocks until a shutdown action is
+/// received or the IPC pipes are closed.
+pub fn run() {
     let (event_logger, log_receiver) = EventLogger::new();
 
     log::set_logger(Box::leak(Box::new(event_logger))).expect("Failed to set logger");
     log::set_max_level(log::LevelFilter::Debug);
 
     init_crypto();
-    resources::set(Box::new(ResourceReaderInstance::new()));
 
     log::info!("Starting servo runner");
 
@@ -365,6 +404,7 @@ fn main() {
                             touch_begin.x as f32,
                             touch_begin.y as f32,
                         )),
+                        servo::TouchPointerType::Touch,
                     )));
                 }
                 servo_action::Action::TouchUpdate(touch_update) => {
@@ -376,6 +416,7 @@ fn main() {
                             touch_update.x as f32,
                             touch_update.y as f32,
                         )),
+                        servo::TouchPointerType::Touch,
                     )));
                 }
                 servo_action::Action::TouchEnd(touch_end) => {
@@ -384,6 +425,7 @@ fn main() {
                         servo::TouchEventType::Up,
                         servo::TouchId(0),
                         WebViewPoint::Device(Point2D::new(touch_end.x as f32, touch_end.y as f32)),
+                        servo::TouchPointerType::Touch,
                     )));
                 }
                 servo_action::Action::TouchCancel(touch_cancel) => {
@@ -395,6 +437,7 @@ fn main() {
                             touch_cancel.x as f32,
                             touch_cancel.y as f32,
                         )),
+                        servo::TouchPointerType::Touch,
                     )));
                 }
                 servo_action::Action::Scroll(scroll) => {
