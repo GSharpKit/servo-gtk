@@ -31,6 +31,7 @@ struct _ServoGtkWebView
     /* Servo FFI state. */
     ServoWebViewHandle *servo;
     GdkPixbuf          *frame;
+    guint               create_idle_id;
     guint               tick_id;
 
     /*< private >*/

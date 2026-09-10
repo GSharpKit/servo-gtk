@@ -163,6 +163,11 @@ servo_gtk_web_view_dispose(GObject *object)
 {
     ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(object);
 
+    if (self->create_idle_id != 0) {
+        g_source_remove(self->create_idle_id);
+        self->create_idle_id = 0;
+    }
+
     if (self->tick_id != 0) {
         gtk_widget_remove_tick_callback(GTK_WIDGET(self), self->tick_id);
         self->tick_id = 0;
@@ -205,9 +210,123 @@ servo_gtk_web_view_draw(GtkWidget *widget, cairo_t *cr)
     return FALSE;
 }
 
+#ifdef G_OS_WIN32
 /*
- * The Servo instance is created lazily on the first allocation, when the real
- * widget size is known, and resized on subsequent allocations.
+ * Servo's rendering context resolves its GL entry points as soon as it is
+ * built. On Windows the loader is wglGetProcAddress(), which only returns
+ * valid pointers while some GL context is current on the calling thread, and
+ * surfman restores the previously current context before Servo gets that far
+ * (surfman's CurrentContextGuard) -- so a context has to be current *already*.
+ * GTK4 provides one incidentally, because its GSK renderer leaves a WGL
+ * context current; GTK3 renders through Cairo/GDI and never makes one current,
+ * so servo_webview_new() would abort the process while reading GL_VERSION.
+ *
+ * Make a GDK GL context current on the widget's window first. It is attached to
+ * the widget so it stays alive for as long as Servo might need its driver.
+ * Returns FALSE if none could be made current, in which case Servo must not be
+ * created at all: constructing it would abort rather than fail.
+ */
+static gboolean
+servo_gtk_web_view_ensure_gl_context(ServoGtkWebView *self)
+{
+    GdkWindow    *window = gtk_widget_get_window(GTK_WIDGET(self));
+    GdkGLContext *context = g_object_get_data(G_OBJECT(self), "servo-gl-context");
+    GError       *error = NULL;
+
+    if (context != NULL) {
+        gdk_gl_context_make_current(context);
+        return TRUE;
+    }
+
+    if (window == NULL) {
+        return FALSE;
+    }
+
+    context = gdk_window_create_gl_context(window, &error);
+    if (context == NULL) {
+        g_warning("Servo: cannot create a GDK GL context: %s", error->message);
+        g_clear_error(&error);
+        return FALSE;
+    }
+
+    if (!gdk_gl_context_realize(context, &error)) {
+        g_warning("Servo: cannot realize the GDK GL context: %s", error->message);
+        g_clear_error(&error);
+        g_object_unref(context);
+        return FALSE;
+    }
+
+    gdk_gl_context_make_current(context);
+    g_object_set_data_full(G_OBJECT(self), "servo-gl-context", context, g_object_unref);
+
+    return TRUE;
+}
+#else
+/*
+ * Elsewhere the loader is eglGetProcAddress()/glXGetProcAddressARB(), which
+ * resolve symbols without a current context, so there is nothing to arrange.
+ */
+static gboolean
+servo_gtk_web_view_ensure_gl_context(ServoGtkWebView *self)
+{
+    (void) self;
+
+    return TRUE;
+}
+#endif
+
+/*
+ * Create the Servo instance, from the main loop rather than from inside
+ * size_allocate(). GTK3 allocates synchronously from gtk_widget_show(), while
+ * the widget is still being realized, which is too early to have a GdkWindow to
+ * hang a GL context off. Running at idle instead means Servo is built against a
+ * realized window and a settled allocation -- the same point in the frame that
+ * GTK4's frame-clock-driven "resize" signal already fires at.
+ */
+static gboolean
+servo_gtk_web_view_create_idle(gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+    GtkAllocation    allocation;
+
+    self->create_idle_id = 0;
+
+    if (self->servo != NULL) {
+        return G_SOURCE_REMOVE;
+    }
+
+    if (!servo_gtk_web_view_ensure_gl_context(self)) {
+        g_warning("Servo: no GL context could be made current; the web view stays blank.");
+        return G_SOURCE_REMOVE;
+    }
+
+    gtk_widget_get_allocation(GTK_WIDGET(self), &allocation);
+
+    /*
+     * Pass any URI requested before creation as the initial URL: Servo creates
+     * the browsing context together with it. Issuing a separate load here
+     * instead would race the context's creation and be dropped.
+     */
+    self->servo = servo_webview_new((guint) MAX(1, allocation.width),
+                                    (guint) MAX(1, allocation.height),
+                                    self->uri);
+    if (self->servo != NULL) {
+        servo_webview_set_frame_ready_callback(
+            self->servo, servo_gtk_web_view_on_frame_ready, self);
+        servo_webview_set_cursor_changed_callback(
+            self->servo, servo_gtk_web_view_on_cursor_changed, self);
+        servo_webview_set_url_changed_callback(
+            self->servo, servo_gtk_web_view_on_url_changed, self);
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * The Servo instance is created lazily once the widget has a real size, and
+ * resized on subsequent allocations. Creation itself is deferred to an idle
+ * (see servo_gtk_web_view_create_idle) because GTK3 allocates from inside
+ * gtk_widget_show()/realize.
  */
 static void
 servo_gtk_web_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation)
@@ -215,26 +334,15 @@ servo_gtk_web_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation)
     GTK_WIDGET_CLASS(servo_gtk_web_view_parent_class)->size_allocate(widget, allocation);
 
     ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(widget);
-    guint width  = (guint) MAX(1, allocation->width);
-    guint height = (guint) MAX(1, allocation->height);
 
     if (self->servo == NULL) {
-        /*
-         * Pass any URI requested before allocation as the initial URL: Servo
-         * creates the browsing context together with it. Issuing a separate
-         * load here instead would race the context's creation and be dropped.
-         */
-        self->servo = servo_webview_new(width, height, self->uri);
-        if (self->servo != NULL) {
-            servo_webview_set_frame_ready_callback(
-                self->servo, servo_gtk_web_view_on_frame_ready, self);
-            servo_webview_set_cursor_changed_callback(
-                self->servo, servo_gtk_web_view_on_cursor_changed, self);
-            servo_webview_set_url_changed_callback(
-                self->servo, servo_gtk_web_view_on_url_changed, self);
+        if (self->create_idle_id == 0) {
+            self->create_idle_id = g_idle_add(servo_gtk_web_view_create_idle, self);
         }
     } else {
-        servo_webview_resize(self->servo, width, height);
+        servo_webview_resize(self->servo,
+                             (guint) MAX(1, allocation->width),
+                             (guint) MAX(1, allocation->height));
     }
 }
 
@@ -498,7 +606,7 @@ servo_gtk_web_view_load_uri(ServoGtkWebView *self, const gchar *uri)
     g_free(self->uri);
     self->uri = g_strdup(uri);
 
-    /* If Servo is already up, load now; otherwise size_allocate will pick it up. */
+    /* If Servo is already up, load now; otherwise creation picks it up. */
     if (self->servo != NULL && self->uri != NULL) {
         servo_webview_load_uri(self->servo, self->uri);
     }
@@ -556,8 +664,8 @@ servo_gtk_web_view_evaluate_script(ServoGtkWebView              *self,
         return;
     }
 
-    /* Servo is created lazily on the first size allocation; without it there is
-     * no browsing context to run the script in. */
+    /* Servo is created lazily, once the widget has been allocated; without it
+     * there is no browsing context to run the script in. */
     if (self->servo == NULL) {
         callback(self, NULL, "web view is not realized yet", user_data);
         return;
