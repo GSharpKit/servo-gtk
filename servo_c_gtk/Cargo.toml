@@ -1,6 +1,6 @@
 [package]
 name = "libservoshell"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 
 [lib]
@@ -9,7 +9,8 @@ name = "libservoshell"
 path = "servo/servo-webview.rs"
 
 [dependencies]
-servo = { version = "0.3.0", default-features = true, features = ["gstreamer", "media-gstreamer", "servo-media-gstreamer"] }
+#servo = { version = "0.5.0", default-features = true, features = ["gstreamer", "media-gstreamer", "servo-media-gstreamer"] }
+servo = { version = "0.5.0", default-features = true }
 # Versions pinned to whatever `servo` resolves to, so the euclid/dpi/url types
 # unify with Servo's own (a mismatched copy would be a distinct, incompatible type).
 euclid = "0.22"
@@ -19,6 +20,8 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 # Used to render the serde-serializable `JSValue` returned by evaluate_javascript
 # into a plain JSON string for the C callback. Pinned to whatever `servo` resolves.
 serde_json = "1.0"
+content-security-policy = "=0.8.2"
+#primeorder = "=0.14.0-rc.14"
 
 # jemalloc must NOT use the initial-exec TLS model, or the baked engine overflows
 # the static TLS block when the .so is dlopen'd after startup (e.g. .NET P/Invoke /

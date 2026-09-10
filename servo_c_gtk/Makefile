@@ -1,8 +1,12 @@
+VERSION = 0.5.0
+
 all: build-release-linux build-release-mingw
 
 linux: build-release-linux
 
 mingw: build-release-mingw
+
+ucrt: build-release-ucrt
 
 build-release-linux: Cargo.lock
 	cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release
@@ -13,6 +17,10 @@ build-release-mingw: Cargo.lock
 	mingw64-cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release-mingw
 	ninja -C cmake-build-release-mingw -vv
 
+build-release-ucrt: Cargo.lock
+	ucrt64-cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release-ucrt
+	ninja -C cmake-build-release-ucrt -vv
+
 install: install-linux install-mingw
 
 install-linux:
@@ -20,6 +28,10 @@ install-linux:
 
 install-mingw:
 	cmake --install cmake-build-release-mingw --prefix ${PREFIX}/usr/x86_64-w64-mingw32/sys-root/mingw/
+
+install-ucrt:
+	DESTDIR=${PREFIX} cmake --install cmake-build-release-ucrt --config Release
+
 
 Cargo.lock: Cargo.lock
 	cargo generate-lockfile
@@ -39,10 +51,14 @@ clean:
 	-rm -rf cmake-build-release
 	-rm -rf cmake-build-debug
 	-rm -rf cmake-build-release-mingw
-	-rm .ninja_log
-	-rm CMakeCache.txt
+	-rm -rf cmake-build-release-ucrt
+	#-rm .ninja_log
+	#-rm CMakeCache.txt
 	-rm -rf CMakeFiles/
-	-rm build.ninja
-	-rm cmake_install.cmake
+	#-rm build.ninja
+	#-rm cmake_install.cmake
 	-rm -rf bottles
 
+rpm:
+	make clean
+	cd ../ && cp -r servo_c_gtk servogtk-${VERSION} && cd servogtk-${VERSION} && cd ../ && tar cfJ servogtk-${VERSION}.tar.xz servogtk-${VERSION}/ && rm -rf servogtk-${VERSION}

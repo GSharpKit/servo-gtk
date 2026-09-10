@@ -4,7 +4,7 @@
 * Assume gcc on linux, cmake, Cargo.
 * Cross platform Mingw
 * Framework is Gtk3 and Gtk4
-* We are make a wrapper for Servo Web View written in Rust.
+* We are make a wrapper for Servo Web View written in Rust for Gtk3 and Gtk4.
 * Make small, safe changes rather than large refactorings.
 * Preserve the existing architecture, naming conventions, and formatting.
 
@@ -23,6 +23,17 @@
 * Do not suggest code that weakens TLS, authentication, certificate validation, or access control.
 * Fail closed on authentication, certificate, and validation failures.
 * Clearly mark any insecure suggestions.
+
+### Safety and permissions
+
+Allowed without prompt:
+- read files, list files
+
+Ask first:
+- package installs,
+- git push
+- deleting files, chmod
+- running full build or end to end suites
 
 ## Testing
 

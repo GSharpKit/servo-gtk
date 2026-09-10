@@ -34,7 +34,7 @@ endif()
 
 # Library version (full VERSION x.y.z) and ABI major (SOVERSION). These drive
 # each servogtkN's VERSION/SOVERSION and the libservoshell.so symlink chain below.
-set(SERVO_VERSION 0.3.0)
+set(SERVO_VERSION 0.5.0)
 set(SERVO_SOVERSION 0)
 
 # GObject-introspection namespace is shared; only the nsversion differs per GTK
