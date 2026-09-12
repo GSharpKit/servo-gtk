@@ -9,14 +9,18 @@
 // Each object format spells "embedded library name" differently, so branch on
 // the target OS (CARGO_CFG_TARGET_OS is set by Cargo for the build script):
 //   * ELF   (Linux/BSD): -soname libservoshell.so.0
-//   * Mach-O (macOS):    -install_name @rpath/libservoshell.dylib
+//   * Mach-O (macOS):    -install_name @rpath/libservoshell.0.dylib
 //   * PE    (Windows):   no soname/install_name concept — nothing to stamp.
+//
+// The ELF and Mach-O names both carry the ABI major (0) and match the versioned
+// alias CMake installs next to the real file, so dependents keep resolving the
+// ABI they were linked against. Bump both when SERVO_SOVERSION changes.
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     match target_os.as_str() {
         "macos" | "ios" => {
             println!(
-                "cargo::rustc-link-arg-cdylib=-Wl,-install_name,@rpath/libservoshell.dylib"
+                "cargo::rustc-link-arg-cdylib=-Wl,-install_name,@rpath/libservoshell.0.dylib"
             );
         }
         "windows" => {

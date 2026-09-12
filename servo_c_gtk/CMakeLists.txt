@@ -17,10 +17,10 @@ include(GNUInstallDirs)
 # target library, which can't be executed from the cross toolchain. Default the
 # GIR build off for MinGW; it stays on for native builds. Can be overridden with
 # -DBUILD_GIR=ON/OFF.
-if(MINGW)
-    option(BUILD_GIR "Build GObject-introspection GIR/typelib" OFF)
-else()
+if(LINUX)
     option(BUILD_GIR "Build GObject-introspection GIR/typelib" ON)
+else()
+    option(BUILD_GIR "Build GObject-introspection GIR/typelib" OFF)
 endif()
 
 # Both the GTK3 and GTK4 variants of the library are built together, each
@@ -40,6 +40,14 @@ set(SERVO_SOVERSION 0)
 # GObject-introspection namespace is shared; only the nsversion differs per GTK
 # major (ServoGtk-3.0 / ServoGtk-4.0).
 set(SERVO_GTK_NAMESPACE ServoGtk)
+
+# The "look next to me" RPATH token, so an installed binary finds its siblings
+# in the same directory. ELF spells it $ORIGIN, Mach-O spells it @loader_path.
+if(APPLE)
+    set(SERVO_ORIGIN "@loader_path")
+else()
+    set(SERVO_ORIGIN "$ORIGIN")
+endif()
 
 # ==========================================================================
 # Rust Servo wrapper (libservoshell), built once and shared by both libraries.
@@ -116,6 +124,41 @@ if(WIN32)
     add_custom_target(SERVO DEPENDS ${CARGO_OUTPUT} ${SERVO_IMPLIB})
     # What the C libraries link against (import library on Windows).
     set(SERVO_LINK_LIB ${SERVO_IMPLIB})
+elseif(APPLE)
+    # Mach-O/dylib: same versioned-alias scheme as ELF below, but Apple puts the
+    # version *before* the extension (libservoshell.0.5.0.dylib) and calls the
+    # embedded library name an install_name instead of a soname. build.rs stamps
+    # the crate with install_name @rpath/libservoshell.${SERVO_SOVERSION}.dylib,
+    # so dependents record that and resolve it through their own @loader_path
+    # RPATH -- the Mach-O analogue of the ELF soname handling below.
+    set(CARGO_OUTPUT
+            ${SERVO_OUTPUT_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}libservoshell${CMAKE_SHARED_LIBRARY_SUFFIX}
+    )
+    # Real, versioned file (dereferenced on install) and the install_name/dev symlinks.
+    set(SERVO_REAL   ${SERVO_OUTPUT_DIR}/libservoshell.${SERVO_VERSION}.dylib)
+    set(SERVO_SONAME ${SERVO_OUTPUT_DIR}/libservoshell.${SERVO_SOVERSION}.dylib)
+    set(SERVO_LINK   ${SERVO_OUTPUT_DIR}/libservoshell.dylib)
+
+    add_custom_command(
+            OUTPUT ${CARGO_OUTPUT} ${SERVO_REAL} ${SERVO_SONAME} ${SERVO_LINK}
+            COMMAND ${RUSTUP_EXECUTABLE} run nightly cargo build ${CARGO_BUILD_FLAGS}
+            COMMAND ${CMAKE_COMMAND} -E create_symlink
+                    ${CMAKE_SHARED_LIBRARY_PREFIX}libservoshell${CMAKE_SHARED_LIBRARY_SUFFIX} libservoshell.${SERVO_VERSION}.dylib
+            COMMAND ${CMAKE_COMMAND} -E create_symlink libservoshell.${SERVO_VERSION}.dylib libservoshell.${SERVO_SOVERSION}.dylib
+            COMMAND ${CMAKE_COMMAND} -E create_symlink libservoshell.${SERVO_SOVERSION}.dylib libservoshell.dylib
+            WORKING_DIRECTORY ${SERVO_OUTPUT_DIR}
+            DEPENDS ${CARGO_DEPENDS}
+            COMMENT "Building Rust Servo wrapper (cargo build ${CARGO_BUILD_FLAGS}) + libservoshell dylib symlinks"
+            VERBATIM
+    )
+
+    add_custom_target(SERVO DEPENDS ${CARGO_OUTPUT} ${SERVO_LINK})
+
+    # Link against the libservoshell.dylib symlink: the linker reads its
+    # install_name (@rpath/libservoshell.0.dylib) and records that as each
+    # servogtkN's load command. The full path also adds target/<profile> to the
+    # build-tree RPATH, where libservoshell.0.dylib resolves at runtime.
+    set(SERVO_LINK_LIB ${SERVO_LINK})
 else()
     # The crate is presented as "libservoshell". Cargo still emits libservoshell.so
     # (the crate can't be named `servo` without colliding with its `servo`
@@ -219,9 +262,10 @@ function(add_servo_gtk_library)
             OUTPUT_NAME ${lib}
             VERSION ${SERVO_VERSION}
             SOVERSION ${SERVO_SOVERSION}
-            # The installed library finds libservoshell.so.0 next to it in the
-            # install libdir. The build tree keeps its own RUNPATH (target/<profile>).
-            INSTALL_RPATH "$ORIGIN"
+            # The installed library finds libservoshell.so.0 (libservoshell.0.dylib
+            # on macOS) next to it in the install libdir. The build tree keeps its
+            # own RUNPATH (target/<profile>).
+            INSTALL_RPATH "${SERVO_ORIGIN}"
     )
 
     if(BUILD_GIR)
@@ -371,7 +415,7 @@ function(add_servo_gtk_library)
     # Installed to <prefix>/bin, it finds servogtkN + libservoshell in the install
     # libdir via a relative rpath.
     set_target_properties(${lib}-demo PROPERTIES
-            INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+            INSTALL_RPATH "${SERVO_ORIGIN}/../${CMAKE_INSTALL_LIBDIR}"
     )
 
     install(TARGETS ${lib}-demo
@@ -407,6 +451,19 @@ if(WIN32)
     install(FILES ${CARGO_OUTPUT}
             DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
+elseif(APPLE)
+    # Same as the ELF case below, with Apple's alias naming: the version goes
+    # before the extension, so the chain is
+    # libservoshell.0.5.0.dylib <- libservoshell.0.dylib <- libservoshell.dylib.
+    # The middle link is what dependents' install_name resolves to.
+    install(FILES ${CARGO_OUTPUT}
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RENAME libservoshell.${SERVO_VERSION}.dylib
+    )
+    install(CODE "
+        file(CREATE_LINK libservoshell.${SERVO_VERSION}.dylib \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libservoshell.${SERVO_SOVERSION}.dylib\" SYMBOLIC)
+        file(CREATE_LINK libservoshell.${SERVO_SOVERSION}.dylib     \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libservoshell.dylib\"   SYMBOLIC)
+    ")
 else()
     # install(FILES) copies symlinks verbatim, so install the real Cargo output
     # renamed to the versioned name, then recreate the soname/dev symlinks in the
