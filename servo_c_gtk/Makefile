@@ -16,7 +16,7 @@ build-release-linux: Cargo.lock
 	ninja -C cmake-build-release -vv
 
 build-release-darwinx: Cargo.lock
-	cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release-darwinx
+	darwinx-cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release-darwinx
 	ninja -C cmake-build-release-darwinx -vv
 
 build-release-mingw: Cargo.lock
