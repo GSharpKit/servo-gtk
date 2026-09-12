@@ -16,8 +16,8 @@ build-release-linux: Cargo.lock
 	ninja -C cmake-build-release -vv
 
 build-release-darwinx: Cargo.lock
-	cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release-mac
-	ninja -C cmake-build-release-mac -vv
+	cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release-darwinx
+	ninja -C cmake-build-release-darwinx -vv
 
 build-release-mingw: Cargo.lock
 	mingw64-cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -S . -B cmake-build-release-mingw
@@ -59,7 +59,6 @@ clean:
 	-rm Cargo.lock
 	-rm -rf cmake-build-release
 	-rm -rf cmake-build-debug
-	-rm -rf cmake-build-release-mac
 	-rm -rf cmake-build-release-mingw
 	-rm -rf cmake-build-release-ucrt
 	-rm -rf cmake-build-release-darwinx
