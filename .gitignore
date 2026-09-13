@@ -5,4 +5,4 @@ servo_c_gtk/cmake-build-debug/
 servo_c_gtk/cmake-build-release/
 servo_c_gtk/cmake-build-release-mingw/
 servo_c_gtk/cmake-build-release-ucrt
-
+servo_c_gtk/cmake-build-release-darwinx/
