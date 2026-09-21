@@ -21,7 +21,9 @@
  *     the TC39 Map.prototype.getOrInsert proposal, which Servo's SpiderMonkey
  *     does not expose; without the shim PDFFindController's constructor throws,
  *     PDFViewerApplication.initialize() rejects with nothing logged, and the
- *     viewer renders its toolbar and a permanently empty document area.
+ *     viewer renders its toolbar and a permanently empty document area;
+ *   - turns off PDF.js features Servo cannot render correctly (currently
+ *     auto-linking, see servo_pdf_server_set_viewer_preferences()).
  *
  * Access control: a loopback port is reachable by every process on the machine,
  * so every URL is scoped by a 128-bit capability token generated from OS
@@ -208,6 +210,22 @@ void servo_pdf_server_set_relax_style_csp(ServoPdfServerHandle *server, bool rel
  * Leave "disableRange", "disableStream" and "disableAutoFetch" at their false
  * defaults unless you are deliberately trading speed for memory: those three
  * are what let this server stream a large PDF in chunks.
+ *
+ * The server applies its own defaults first and layers yours on top, so an
+ * option you do not mention keeps the server's value. Currently the only such
+ * default is:
+ *
+ *   "enableAutoLinking": false
+ *
+ * PDF.js 6.x detects URLs in page text and adds a link annotation for each.
+ * One annotation can cover several text runs, so PDF.js emits a single
+ * deliberately oversized element - heights above 200% of the page are normal -
+ * and clips it back to the real runs with clip-path: url(#...). Servo parses
+ * that property but applies neither the paint clip nor the hit-test clip, so
+ * the element stays full size: the whole page takes on PDF.js's yellow
+ * link-hover tint, and a click anywhere on the page follows the detected URL.
+ * Set "enableAutoLinking": true to get the feature back once Servo supports
+ * SVG clip paths.
  *
  * Returns true if accepted (or cleared), false if the JSON is invalid or is not
  * an object, in which case nothing changes.

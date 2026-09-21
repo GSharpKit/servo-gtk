@@ -609,18 +609,51 @@ const ENGINE_SHIMS: &str = r#"(function () {
 })();
 "#;
 
-/// Build the boot script: compatibility shims, then any embedder preferences.
-fn bootstrap_script(config: &ServerConfig) -> String {
-    let mut script = String::from(ENGINE_SHIMS);
+/// Viewer options this server turns off by default because Servo cannot render
+/// the feature correctly. The embedder can switch any of them back on through
+/// [`servo_pdf_server_set_viewer_preferences`].
+///
+/// * `enableAutoLinking` — PDF.js 6.x detects URLs in page text and adds a
+///   link annotation for each. One annotation can span several text runs, so
+///   PDF.js emits a single deliberately oversized element (heights over 200%
+///   of the page are normal) and clips it back to the real runs with
+///   `clip-path: url(#…)`. Servo parses that property but applies neither the
+///   paint clip nor the hit-test clip, so the element stays full size: the
+///   whole page picks up PDF.js's yellow link-hover tint, and — worse — a
+///   click anywhere on the page follows the detected URL.
+fn servo_default_preferences() -> serde_json::Map<String, serde_json::Value> {
+    let mut defaults = serde_json::Map::new();
+    defaults.insert("enableAutoLinking".to_owned(), serde_json::Value::Bool(false));
+    defaults
+}
+
+/// The options to apply to the viewer: this server's defaults, with the
+/// embedder's preferences layered on top so they always win.
+fn viewer_overrides(config: &ServerConfig) -> String {
+    let mut overrides = servo_default_preferences();
 
     let preferences = config
         .viewer_preferences
         .read()
         .ok()
         .and_then(|guard| guard.clone());
-    let Some(json) = preferences else {
-        return script;
-    };
+    if let Some(json) = preferences {
+        // Already validated as an object by the setter; ignore it if that ever
+        // stops holding rather than dropping the defaults too.
+        if let Ok(serde_json::Value::Object(embedder)) = serde_json::from_str(&json) {
+            for (name, value) in embedder {
+                overrides.insert(name, value);
+            }
+        }
+    }
+
+    serde_json::Value::Object(overrides).to_string()
+}
+
+/// Build the boot script: compatibility shims, then the viewer options.
+fn bootstrap_script(config: &ServerConfig) -> String {
+    let mut script = String::from(ENGINE_SHIMS);
+    let json = viewer_overrides(config);
 
     // Two mechanisms, because PDF.js splits its settings in two:
     //
@@ -1777,8 +1810,9 @@ mod tests {
         assert!(head.contains("Content-Type: text/javascript; charset=utf-8"), "{head}");
         assert!(boot.contains("getOrInsertComputed"), "shim missing");
         assert!(boot.contains("unhandledrejection"), "rejection reporter missing");
-        // Nothing preference-related until the embedder asks for it.
-        assert!(!boot.contains("pdfjs.preferences"));
+        // Auto-linking is off by default even with no embedder preferences:
+        // Servo ignores the clip-path PDF.js uses to size inferred links.
+        assert!(boot.contains("\"enableAutoLinking\":false"), "default missing");
 
         // Only JSON objects are accepted.
         assert!(!unsafe {
@@ -1799,6 +1833,36 @@ mod tests {
         assert!(boot.contains("getOrInsertComputed"), "shim lost");
         assert!(boot.contains("\"enableScripting\":false"));
         assert!(boot.contains("webviewerloaded"));
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn servo_defaults_apply_but_the_embedder_wins() {
+        let root = fixture("defaults");
+        let server = start_server(&root.join("pdfjs"), None).expect("server starts");
+        let address = server.address;
+        let token = server.config.token.clone();
+        let handle = &server as *const ServoPdfServerHandle as *mut ServoPdfServerHandle;
+
+        // An unrelated preference must not displace the defaults.
+        assert!(unsafe {
+            servo_pdf_server_set_viewer_preferences(handle, c"{\"enableScripting\":false}".as_ptr())
+        });
+        let (_, boot) = get(address, &format!("/{token}/pdfjs/__servo_embed_bootstrap.js"));
+        let boot = String::from_utf8_lossy(&boot);
+        assert!(boot.contains("\"enableAutoLinking\":false"), "default lost: {boot}");
+        assert!(boot.contains("\"enableScripting\":false"));
+
+        // Setting it explicitly overrides the default.
+        assert!(unsafe {
+            servo_pdf_server_set_viewer_preferences(handle, c"{\"enableAutoLinking\":true}".as_ptr())
+        });
+        let (_, boot) = get(address, &format!("/{token}/pdfjs/__servo_embed_bootstrap.js"));
+        let boot = String::from_utf8_lossy(&boot);
+        assert!(boot.contains("\"enableAutoLinking\":true"), "override ignored: {boot}");
+        assert!(!boot.contains("\"enableAutoLinking\":false"));
 
         drop(server);
         let _ = std::fs::remove_dir_all(&root);
