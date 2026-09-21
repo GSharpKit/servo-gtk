@@ -23,7 +23,16 @@
  *     PDFViewerApplication.initialize() rejects with nothing logged, and the
  *     viewer renders its toolbar and a permanently empty document area;
  *   - turns off PDF.js features Servo cannot render correctly (currently
- *     auto-linking, see servo_pdf_server_set_viewer_preferences()).
+ *     auto-linking, see servo_pdf_server_set_viewer_preferences());
+ *   - rewrites mask-based icons in the PDF.js stylesheets. PDF.js draws all of
+ *     its toolbar icons as a coloured box masked to the shape of an SVG, and
+ *     Servo implements no CSS masking at all, so every icon would otherwise
+ *     render as a plain 16x16 black block. Each `mask-image` declaration gains
+ *     an equivalent `background-image`, which Servo does support. The original
+ *     mask declaration is kept, so an engine that masks still masks — but with
+ *     the background colour cleared it draws the glyph in its own colour
+ *     rather than the theme's. Stylesheets that use no masking are untouched
+ *     and stay cacheable.
  *
  * Access control: a loopback port is reachable by every process on the machine,
  * so every URL is scoped by a 128-bit capability token generated from OS

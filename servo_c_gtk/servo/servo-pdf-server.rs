@@ -481,6 +481,29 @@ fn file_response(
     let etag = entity_tag(&metadata);
     let last_modified = metadata.modified().ok().map(http_date);
 
+    // Stylesheets that lean on CSS masking need the icon fallback woven in, so
+    // their bytes no longer match the file on disk either.
+    if content_type.starts_with("text/css") && url_path.starts_with(PDFJS_PREFIX) {
+        let mut css = String::new();
+        if file.read_to_string(&mut css).is_err() {
+            return error_response(500);
+        }
+        if css.contains("mask-image:") {
+            let css = inline_mask_icon_fallback(&css);
+            return Response::new(200)
+                .header("Content-Type", content_type)
+                .header("Cache-Control", "no-store")
+                .header("Referrer-Policy", "no-referrer")
+                .header("X-Content-Type-Options", "nosniff")
+                .with_body(Body::Bytes(css.into_bytes()));
+        }
+        // No masking in this sheet: fall through and serve the file as-is,
+        // cacheable and range-able like any other asset.
+        if file.seek(SeekFrom::Start(0)).is_err() {
+            return error_response(500);
+        }
+    }
+
     // PDF.js HTML is always rewritten to carry the boot script, so its bytes no
     // longer match the file on disk: no ETag, no range, no caching.
     if content_type.starts_with("text/html") && url_path.starts_with(PDFJS_PREFIX) {
@@ -730,6 +753,64 @@ fn relax_style_csp(html: &str) -> String {
         }
         rest = tail;
     }
+    out.push_str(rest);
+    out
+}
+
+/// Give every `mask-image` declaration a `background-image` equivalent.
+///
+/// PDF.js draws all ~90 of its toolbar icons as a coloured box masked to the
+/// shape of an SVG (`background-color: …; mask-image: var(--icon)`). Servo
+/// implements no CSS masking at all — `CSS.supports("mask-image", …)` is false
+/// and the declaration is dropped at parse time — so the mask never applies
+/// and every icon renders as the bare 16x16 coloured block underneath it.
+///
+/// The icon SVGs draw their glyph with `fill="black"`, so the same URL works
+/// directly as a background image. Rewriting the declaration in place keeps
+/// this free of CSS parsing: whatever rule contained the mask now also sets an
+/// equivalent background, whether the rule was flat or nested, without ever
+/// needing to know its selector.
+///
+/// The background colour has to be cleared or the block would still be painted
+/// underneath the glyph. An engine that *does* mask therefore renders these
+/// icons in the glyph's own colour rather than the theme's — acceptable here,
+/// since this server exists to host PDF.js for Servo.
+fn inline_mask_icon_fallback(css: &str) -> String {
+    const NEEDLE: &str = "mask-image:";
+    let mut out = String::with_capacity(css.len() + css.len() / 8);
+    let mut rest = css;
+
+    while let Some(index) = rest.find(NEEDLE) {
+        let (before, after) = rest.split_at(index + NEEDLE.len());
+        out.push_str(before);
+        rest = after;
+
+        // `-webkit-mask-image:` also ends with the needle; only the standard
+        // property should be augmented, or every icon would get two copies.
+        let prefix = &before[..before.len() - NEEDLE.len()];
+        let prefixed = prefix
+            .chars()
+            .next_back()
+            .is_some_and(|c| c == '-' || c.is_ascii_alphanumeric());
+
+        // The declaration runs to the next `;` or to the end of the block.
+        let end = rest.find([';', '}']).unwrap_or(rest.len());
+        let (value, tail) = rest.split_at(end);
+        out.push_str(value);
+        rest = tail;
+
+        if !prefixed && !value.trim().is_empty() {
+            out.push_str(&format!(
+                ";background-image:{};\
+                 background-color:transparent;\
+                 background-repeat:no-repeat;\
+                 background-position:center;\
+                 background-size:contain",
+                value.trim()
+            ));
+        }
+    }
+
     out.push_str(rest);
     out
 }
@@ -1866,6 +1947,28 @@ mod tests {
 
         drop(server);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mask_icons_gain_a_background_image_fallback() {
+        // The standard property is augmented; the -webkit- alias is left alone
+        // so the icon is not declared twice.
+        let css = "#zoomIn::before{-webkit-mask-image:var(--i);mask-image:var(--i);}";
+        let out = inline_mask_icon_fallback(css);
+        assert_eq!(out.matches("background-image:var(--i)").count(), 1, "{out}");
+        assert!(out.contains("-webkit-mask-image:var(--i);"), "{out}");
+        assert!(out.contains("background-color:transparent"), "{out}");
+        // The original declaration survives, so a masking engine still masks.
+        assert!(out.contains("mask-image:var(--i);background-image:"), "{out}");
+
+        // A declaration ending at the closing brace rather than a semicolon.
+        let out = inline_mask_icon_fallback("a{mask-image:url(x.svg)}");
+        assert!(out.contains("background-image:url(x.svg)"), "{out}");
+        assert!(out.ends_with("contain}"), "{out}");
+
+        // Sheets without masking are returned untouched.
+        let plain = "a{color:red}";
+        assert_eq!(inline_mask_icon_fallback(plain), plain);
     }
 
     #[test]
