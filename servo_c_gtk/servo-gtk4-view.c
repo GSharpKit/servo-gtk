@@ -4,6 +4,31 @@
 
 #include <gdk/gdkkeysyms.h>
 
+/*
+ * Printing has two backends, because the platforms differ fundamentally in
+ * what their spooler will accept:
+ *
+ *   Unix  - CUPS takes a PDF as-is, so gtk-unix-print can hand the file
+ *           straight to the queue (GtkPrintJob + gtk_print_job_set_source_file).
+ *   Win32 - the print spooler is driver-based and will not generally accept a
+ *           PDF, so the file is handed to whichever application is registered
+ *           for .pdf via the shell's "printto"/"print" verb.
+ *
+ * Either way the document is spooled as it is on disk. It is never rendered
+ * here and never goes through Servo, so printed output does not depend on how
+ * the engine draws the document.
+ */
+#if defined(HAVE_GTK_UNIX_PRINT)
+#define SERVO_GTK_CAN_PRINT 1
+#include <gtk/gtkunixprint.h>
+#elif defined(G_OS_WIN32)
+#define SERVO_GTK_CAN_PRINT 1
+#include <windows.h>
+#include <commdlg.h>
+#include <shellapi.h>
+#include <gdk/win32/gdkwin32.h>
+#endif
+
 enum {
     PROP_0,
     PROP_URI,
@@ -631,3 +656,340 @@ servo_gtk_web_view_evaluate_script(ServoGtkWebView              *self,
                                   servo_gtk_web_view_on_script_result,
                                   closure);
 }
+
+
+/* ------------------------------------------------------------------------
+ * Printing
+ * ------------------------------------------------------------------------ */
+
+/*
+ * Pending result of a print request. Heap-allocated so the outcome can be
+ * delivered from the main loop after the dialog (and, on Unix, the spooler)
+ * have finished, and so the web view stays alive until then.
+ */
+typedef struct {
+    ServoGtkWebView             *web_view;
+    ServoGtkPrintResultCallback  callback;
+    gpointer                     user_data;
+    gboolean                     printed;
+    gchar                       *error;
+} PrintResultClosure;
+
+static gboolean
+servo_gtk_web_view_deliver_print_result(gpointer data)
+{
+    PrintResultClosure *closure = data;
+
+    closure->callback(closure->web_view, closure->printed, closure->error,
+                      closure->user_data);
+
+    g_object_unref(closure->web_view);
+    g_free(closure->error);
+    g_free(closure);
+
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * Report the outcome of a print request. Always deferred to the main loop, so
+ * the callback contract is the same whether the request failed immediately,
+ * was cancelled in the dialog, or completed in the spooler much later.
+ */
+static void
+servo_gtk_web_view_print_done(ServoGtkWebView             *self,
+                              ServoGtkPrintResultCallback  callback,
+                              gpointer                     user_data,
+                              gboolean                     printed,
+                              const gchar                 *error)
+{
+    if (callback == NULL) {
+        /* Nobody is listening, but a failure should not vanish silently. */
+        if (error != NULL) {
+            g_warning("servo_gtk_web_view_print_pdf: %s", error);
+        }
+        return;
+    }
+
+    PrintResultClosure *closure = g_new0(PrintResultClosure, 1);
+    closure->web_view  = g_object_ref(self);
+    closure->callback  = callback;
+    closure->user_data = user_data;
+    closure->printed   = printed;
+    closure->error     = g_strdup(error);
+
+    g_idle_add(servo_gtk_web_view_deliver_print_result, closure);
+}
+
+gboolean
+servo_gtk_web_view_can_print(void)
+{
+#ifdef SERVO_GTK_CAN_PRINT
+    return TRUE;
+#else
+    return FALSE;
+#endif
+}
+
+/* The print dialog is owned by the window holding the web view, if any. */
+static GtkWindow *
+servo_gtk_web_view_parent_window(ServoGtkWebView *self)
+{
+    GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(self));
+
+    return GTK_IS_WINDOW(root) ? GTK_WINDOW(root) : NULL;
+}
+
+#if defined(HAVE_GTK_UNIX_PRINT)
+
+/* Context for the spooler callback, which outlives the print dialog. */
+typedef struct {
+    ServoGtkWebView             *web_view;
+    ServoGtkPrintResultCallback  callback;
+    gpointer                     user_data;
+} PrintJobClosure;
+
+/* The print dialog is asynchronous in GTK4, so the request survives in here. */
+typedef struct {
+    ServoGtkWebView             *web_view;
+    gchar                       *path;
+    ServoGtkPrintResultCallback  callback;
+    gpointer                     user_data;
+} PrintRequestClosure;
+
+static void
+servo_gtk_web_view_on_print_job_complete(GtkPrintJob  *job,
+                                         gpointer      user_data,
+                                         const GError *error)
+{
+    PrintJobClosure *closure = user_data;
+
+    (void) job;
+
+    servo_gtk_web_view_print_done(closure->web_view, closure->callback,
+                                  closure->user_data,
+                                  error == NULL,
+                                  error != NULL ? error->message : NULL);
+
+    g_object_unref(closure->web_view);
+    g_free(closure);
+}
+
+static void
+servo_gtk_web_view_on_print_response(GtkDialog *dialog,
+                                     int        response,
+                                     gpointer   user_data)
+{
+    PrintRequestClosure *request = user_data;
+    ServoGtkWebView     *self = request->web_view;
+
+    if (response != GTK_RESPONSE_OK) {
+        servo_gtk_web_view_print_done(self, request->callback, request->user_data,
+                                      FALSE, NULL);
+    } else {
+        GtkPrintUnixDialog *print_dialog = GTK_PRINT_UNIX_DIALOG(dialog);
+        GtkPrinter         *printer = gtk_print_unix_dialog_get_selected_printer(print_dialog);
+        GtkPrintSettings   *settings = gtk_print_unix_dialog_get_settings(print_dialog);
+        GtkPageSetup       *page_setup = gtk_print_unix_dialog_get_page_setup(print_dialog);
+
+        /* Fail closed rather than spooling a PDF to a queue that cannot take one. */
+        if (printer == NULL) {
+            servo_gtk_web_view_print_done(self, request->callback, request->user_data,
+                                          FALSE, "no printer selected");
+        } else if (!gtk_printer_accepts_pdf(printer)) {
+            gchar *message = g_strdup_printf(
+                "printer \"%s\" does not accept PDF jobs, and the file is sent unchanged",
+                gtk_printer_get_name(printer));
+
+            servo_gtk_web_view_print_done(self, request->callback, request->user_data,
+                                          FALSE, message);
+            g_free(message);
+        } else {
+            gchar       *title = g_path_get_basename(request->path);
+            GtkPrintJob *job = gtk_print_job_new(title, printer, settings, page_setup);
+            GError      *error = NULL;
+
+            if (!gtk_print_job_set_source_file(job, request->path, &error)) {
+                gchar *message = g_strdup_printf("could not read \"%s\": %s",
+                                                 request->path, error->message);
+
+                servo_gtk_web_view_print_done(self, request->callback,
+                                              request->user_data, FALSE, message);
+                g_free(message);
+                g_clear_error(&error);
+            } else {
+                PrintJobClosure *closure = g_new0(PrintJobClosure, 1);
+                closure->web_view  = g_object_ref(self);
+                closure->callback  = request->callback;
+                closure->user_data = request->user_data;
+
+                /* Takes its own references; the callback runs when spooling ends. */
+                gtk_print_job_send(job, servo_gtk_web_view_on_print_job_complete,
+                                   closure, NULL);
+            }
+
+            g_object_unref(job);
+            g_free(title);
+        }
+
+        g_clear_object(&settings);
+    }
+
+    gtk_window_destroy(GTK_WINDOW(dialog));
+
+    g_object_unref(request->web_view);
+    g_free(request->path);
+    g_free(request);
+}
+
+void
+servo_gtk_web_view_print_pdf(ServoGtkWebView             *self,
+                             const gchar                 *path,
+                             ServoGtkPrintResultCallback  callback,
+                             gpointer                     user_data)
+{
+    g_return_if_fail(SERVO_GTK_IS_WEB_VIEW(self));
+    g_return_if_fail(path != NULL);
+
+    GtkWidget *dialog = gtk_print_unix_dialog_new("Print", servo_gtk_web_view_parent_window(self));
+    /* The file is spooled verbatim, so page handling is the printer's job. */
+    gtk_print_unix_dialog_set_manual_capabilities(GTK_PRINT_UNIX_DIALOG(dialog),
+                                                  GTK_PRINT_CAPABILITY_COPIES |
+                                                  GTK_PRINT_CAPABILITY_COLLATE |
+                                                  GTK_PRINT_CAPABILITY_REVERSE);
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+
+    PrintRequestClosure *request = g_new0(PrintRequestClosure, 1);
+    request->web_view  = g_object_ref(self);
+    request->path      = g_strdup(path);
+    request->callback  = callback;
+    request->user_data = user_data;
+
+    g_signal_connect(dialog, "response",
+                     G_CALLBACK(servo_gtk_web_view_on_print_response), request);
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+#elif defined(G_OS_WIN32)
+
+void
+servo_gtk_web_view_print_pdf(ServoGtkWebView             *self,
+                             const gchar                 *path,
+                             ServoGtkPrintResultCallback  callback,
+                             gpointer                     user_data)
+{
+    g_return_if_fail(SERVO_GTK_IS_WEB_VIEW(self));
+    g_return_if_fail(path != NULL);
+
+    GtkWindow  *parent = servo_gtk_web_view_parent_window(self);
+    GdkSurface *surface = parent != NULL
+        ? gtk_native_get_surface(GTK_NATIVE(parent))
+        : NULL;
+    PRINTDLGW   dialog;
+
+    ZeroMemory(&dialog, sizeof dialog);
+    dialog.lStructSize = sizeof dialog;
+    dialog.hwndOwner = surface != NULL ? gdk_win32_surface_get_handle(surface) : NULL;
+    /* Page ranges and copies belong to the registered reader, not to us. */
+    dialog.Flags = PD_NOPAGENUMS | PD_NOSELECTION | PD_USEDEVMODECOPIESANDCOLLATE;
+
+    if (!PrintDlgW(&dialog)) {
+        DWORD dialog_error = CommDlgExtendedError();
+
+        /* Zero means the user simply cancelled. */
+        if (dialog_error != 0) {
+            gchar *message = g_strdup_printf("could not open the print dialog (0x%lx)",
+                                             (unsigned long) dialog_error);
+
+            servo_gtk_web_view_print_done(self, callback, user_data, FALSE, message);
+            g_free(message);
+        } else {
+            servo_gtk_web_view_print_done(self, callback, user_data, FALSE, NULL);
+        }
+    } else {
+        DEVNAMES *names = dialog.hDevNames != NULL
+            ? (DEVNAMES *) GlobalLock(dialog.hDevNames)
+            : NULL;
+
+        if (names == NULL) {
+            servo_gtk_web_view_print_done(self, callback, user_data, FALSE,
+                                          "the print dialog returned no printer");
+        } else {
+            /* DEVNAMES offsets are in characters from the start of the struct. */
+            const gunichar2 *device = (const gunichar2 *) names + names->wDeviceOffset;
+            gboolean         is_default = (names->wDefault & DN_DEFAULTPRN) != 0;
+
+            gchar     *printer = g_utf16_to_utf8(device, -1, NULL, NULL, NULL);
+            gchar     *quoted = printer != NULL ? g_strdup_printf("\"%s\"", printer) : NULL;
+            gunichar2 *wide_path = g_utf8_to_utf16(path, -1, NULL, NULL, NULL);
+            gunichar2 *wide_args = quoted != NULL
+                ? g_utf8_to_utf16(quoted, -1, NULL, NULL, NULL)
+                : NULL;
+
+            if (wide_path == NULL || wide_args == NULL) {
+                servo_gtk_web_view_print_done(self, callback, user_data, FALSE,
+                                              "could not encode the file name for Windows");
+            } else {
+                INT_PTR result = (INT_PTR) ShellExecuteW(dialog.hwndOwner, L"printto",
+                                                         (LPCWSTR) wide_path,
+                                                         (LPCWSTR) wide_args,
+                                                         NULL, SW_HIDE);
+
+                if (result <= 32 && is_default) {
+                    /* "print" always uses the default printer, which is what
+                     * the user chose, so this cannot misroute the job. */
+                    result = (INT_PTR) ShellExecuteW(dialog.hwndOwner, L"print",
+                                                     (LPCWSTR) wide_path,
+                                                     NULL, NULL, SW_HIDE);
+                }
+
+                if (result <= 32) {
+                    gchar *message = g_strdup_printf(
+                        "Windows could not print \"%s\" (error %d). A PDF is printed by "
+                        "the application registered for .pdf files; install a PDF reader, "
+                        "or choose the default printer so the simpler \"print\" command "
+                        "can be used.",
+                        path, (int) result);
+
+                    servo_gtk_web_view_print_done(self, callback, user_data, FALSE, message);
+                    g_free(message);
+                } else {
+                    servo_gtk_web_view_print_done(self, callback, user_data, TRUE, NULL);
+                }
+            }
+
+            g_free(wide_args);
+            g_free(wide_path);
+            g_free(quoted);
+            g_free(printer);
+            GlobalUnlock(dialog.hDevNames);
+        }
+    }
+
+    /* PrintDlgW may allocate these even when it returns FALSE. */
+    if (dialog.hDevNames != NULL) {
+        GlobalFree(dialog.hDevNames);
+    }
+    if (dialog.hDevMode != NULL) {
+        GlobalFree(dialog.hDevMode);
+    }
+    if (dialog.hDC != NULL) {
+        DeleteDC(dialog.hDC);
+    }
+}
+
+#else
+
+void
+servo_gtk_web_view_print_pdf(ServoGtkWebView             *self,
+                             const gchar                 *path,
+                             ServoGtkPrintResultCallback  callback,
+                             gpointer                     user_data)
+{
+    g_return_if_fail(SERVO_GTK_IS_WEB_VIEW(self));
+    g_return_if_fail(path != NULL);
+
+    servo_gtk_web_view_print_done(self, callback, user_data, FALSE,
+                                  "this build has no printing backend");
+}
+
+#endif /* printing backends */

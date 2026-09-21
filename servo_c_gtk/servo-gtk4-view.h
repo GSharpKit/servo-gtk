@@ -117,6 +117,67 @@ void servo_gtk_web_view_evaluate_script(
     gpointer                          user_data
 );
 
+/**
+ * ServoGtkPrintResultCallback:
+ * @web_view: the #ServoGtkWebView the print was requested from
+ * @printed: %TRUE if the document was handed to a printer, %FALSE if the user
+ *   cancelled or printing failed
+ * @error: (nullable): a human-readable error message, or %NULL when @printed
+ *   is %TRUE or the user simply cancelled
+ * @user_data: the user data passed to servo_gtk_web_view_print_pdf()
+ *
+ * Invoked exactly once when a print request finishes. @error is only non-%NULL
+ * when something actually went wrong; a cancelled dialog reports
+ * @printed = %FALSE with @error = %NULL. The string is only valid for the
+ * duration of the call.
+ */
+typedef void (*ServoGtkPrintResultCallback) (
+    ServoGtkWebView *web_view,
+    gboolean         printed,
+    const gchar     *error,
+    gpointer         user_data
+);
+
+/**
+ * servo_gtk_web_view_can_print:
+ *
+ * Whether this build has a printing backend, and therefore whether
+ * servo_gtk_web_view_print_pdf() can do anything. Use it to decide whether to
+ * offer a print action at all.
+ *
+ * Returns: %TRUE if printing is supported on this platform
+ */
+gboolean servo_gtk_web_view_can_print(void);
+
+/**
+ * servo_gtk_web_view_print_pdf:
+ * @self: a #ServoGtkWebView
+ * @path: (type filename): the PDF file to print
+ * @callback: (scope async) (nullable) (closure user_data): invoked once when
+ *   the request finishes, or %NULL to ignore the outcome
+ * @user_data: user data passed to @callback
+ *
+ * Asks the user for a printer and sends @path to it.
+ *
+ * The file is spooled as it is on disk — it is never rendered by the web view,
+ * so the printed result does not depend on how the document happens to display.
+ * @path need not be the document currently shown; any readable PDF works.
+ *
+ * How the file reaches the printer is platform-specific. On Unix it is handed
+ * to the print queue directly (CUPS accepts PDF). On Windows, where the spooler
+ * will not generally take a PDF, it is passed to the application registered for
+ * `.pdf`. Where neither is available servo_gtk_web_view_can_print() returns
+ * %FALSE and this reports an error.
+ *
+ * @callback is invoked exactly once, later, from the GTK main loop.
+ */
+void servo_gtk_web_view_print_pdf(
+    ServoGtkWebView             *self,
+    const gchar                 *path,
+    ServoGtkPrintResultCallback  callback,
+    gpointer                     user_data
+);
+
 G_END_DECLS
 
 #endif /* SERVO_GTK4_VIEW_H */

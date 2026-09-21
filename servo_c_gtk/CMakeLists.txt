@@ -29,10 +29,11 @@ endif()
 pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
 pkg_check_modules(GTK4 REQUIRED gtk4)
 
-# gtk-unix-print is what lets the demo hand a PDF straight to a CUPS queue
-# (GtkPrintJob + gtk_print_job_set_source_file), with no rasterisation and no
-# Poppler. It ships with GTK on Unix but does not exist for MinGW/Windows, so
-# it is optional: without it the demo simply builds without its Print button.
+# gtk-unix-print is what lets servo_gtk_web_view_print_pdf() hand a PDF straight
+# to a CUPS queue (GtkPrintJob + gtk_print_job_set_source_file), with no
+# rasterisation and no Poppler. It ships with GTK on Unix but does not exist for
+# MinGW/Windows, which uses the shell print verb instead. Both are optional:
+# without either, servo_gtk_web_view_can_print() reports FALSE.
 pkg_check_modules(GTK3_UNIX_PRINT QUIET gtk+-unix-print-3.0)
 pkg_check_modules(GTK4_UNIX_PRINT QUIET gtk4-unix-print)
 if(BUILD_GIR)
@@ -267,6 +268,25 @@ function(add_servo_gtk_library)
             ${gtk_libraries}
     )
 
+    # Printing backend for servo_gtk_web_view_print_pdf(). Kept PRIVATE: the
+    # public header exposes only plain C types, so consumers do not need these
+    # flags and the .pc file gains no new Requires.
+    if(${ARG_GTK_PREFIX}_UNIX_PRINT_FOUND)
+        target_include_directories(${lib} PRIVATE ${${ARG_GTK_PREFIX}_UNIX_PRINT_INCLUDE_DIRS})
+        target_link_libraries(${lib} PRIVATE ${${ARG_GTK_PREFIX}_UNIX_PRINT_LIBRARIES})
+        target_compile_definitions(${lib} PRIVATE HAVE_GTK_UNIX_PRINT)
+        message(STATUS "${lib}: printing via gtk-unix-print (PDF straight to the queue)")
+    elseif(WIN32)
+        # No gtk-unix-print on Windows: print through the shell's "printto" /
+        # "print" verb (ShellExecuteW), choosing the printer with the standard
+        # PrintDlgW dialog. gdi32 is for the DEVMODE/DC cleanup PrintDlgW can
+        # hand back; GTK4's .pc does not pull it in the way GTK3's does.
+        target_link_libraries(${lib} PRIVATE shell32 comdlg32 gdi32)
+        message(STATUS "${lib}: printing via the Windows shell print verb")
+    else()
+        message(STATUS "${lib}: no printing backend, servo_gtk_web_view_can_print() is FALSE")
+    endif()
+
     set_target_properties(${lib} PROPERTIES
             OUTPUT_NAME ${lib}
             VERSION ${SERVO_VERSION}
@@ -307,6 +327,16 @@ function(add_servo_gtk_library)
         )
 
         target_compile_options(${lib}-scan PRIVATE ${gtk_cflags_other})
+
+        # Same printing backend as the real library: the twin compiles the same
+        # sources, so it must see the same headers and defines.
+        if(${ARG_GTK_PREFIX}_UNIX_PRINT_FOUND)
+            target_include_directories(${lib}-scan PRIVATE ${${ARG_GTK_PREFIX}_UNIX_PRINT_INCLUDE_DIRS})
+            target_link_libraries(${lib}-scan PRIVATE ${${ARG_GTK_PREFIX}_UNIX_PRINT_LIBRARIES})
+            target_compile_definitions(${lib}-scan PRIVATE HAVE_GTK_UNIX_PRINT)
+        elseif(WIN32)
+            target_link_libraries(${lib}-scan PRIVATE shell32 comdlg32 gdi32)
+        endif()
         target_link_libraries(${lib}-scan PRIVATE ${gtk_libraries})
 
         set(scan_dir ${CMAKE_CURRENT_BINARY_DIR}/scan${ARG_MAJOR})
@@ -421,15 +451,6 @@ function(add_servo_gtk_library)
             PRIVATE
             ${lib}
             ${gtk_libraries})
-
-    # Optional: direct-to-printer PDF spooling (see the top of this file).
-    if(${ARG_GTK_PREFIX}_UNIX_PRINT_FOUND)
-        target_include_directories(${lib}-demo PRIVATE ${${ARG_GTK_PREFIX}_UNIX_PRINT_INCLUDE_DIRS})
-        target_link_libraries(${lib}-demo PRIVATE ${${ARG_GTK_PREFIX}_UNIX_PRINT_LIBRARIES})
-        target_compile_definitions(${lib}-demo PRIVATE HAVE_GTK_UNIX_PRINT)
-    else()
-        message(STATUS "${lib}-demo: gtk-unix-print not found, building without the Print button")
-    endif()
 
     # Installed to <prefix>/bin, it finds servogtkN + libservoshell in the install
     # libdir via a relative rpath.
