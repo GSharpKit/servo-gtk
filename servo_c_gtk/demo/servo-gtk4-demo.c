@@ -60,22 +60,38 @@ pdf_demo_error(PdfDemo *demo, const gchar *format, ...)
     g_free(message);
 }
 
-/* Locate a PDF.js release: $PDFJS_DIR first, then the usual system locations. */
+/* Whether `dir` looks like the root of a PDF.js release. */
+static gboolean
+is_pdfjs_dir(const gchar *dir)
+{
+    gchar    *viewer = g_build_filename(dir, "web", "viewer.html", NULL);
+    gboolean  found = g_file_test(viewer, G_FILE_TEST_IS_REGULAR);
+
+    g_free(viewer);
+
+    return found;
+}
+
+/*
+ * Locate a PDF.js release: $PDFJS_DIR first, then the usual system locations.
+ *
+ * $PDFJS_DIR is validated like any other candidate. Taking it on trust is worse
+ * than useless: the server starts happily on any directory that exists, every
+ * request 404s, and the viewer is a blank page with nothing to explain it. The
+ * easy mistake is naming the release's web/ subdirectory rather than the
+ * release root.
+ */
 static gchar *
 find_pdfjs_dir(void)
 {
     const gchar *from_env = g_getenv("PDFJS_DIR");
 
     if (from_env != NULL && *from_env != '\0') {
-        return g_strdup(from_env);
+        return is_pdfjs_dir(from_env) ? g_strdup(from_env) : NULL;
     }
 
     for (gsize i = 0; PDFJS_SEARCH_PATH[i] != NULL; i++) {
-        gchar *viewer = g_build_filename(PDFJS_SEARCH_PATH[i], "web", "viewer.html", NULL);
-        gboolean found = g_file_test(viewer, G_FILE_TEST_IS_REGULAR);
-        g_free(viewer);
-
-        if (found) {
+        if (is_pdfjs_dir(PDFJS_SEARCH_PATH[i])) {
             return g_strdup(PDFJS_SEARCH_PATH[i]);
         }
     }
@@ -97,10 +113,22 @@ ensure_pdf_server(PdfDemo *demo)
 
     gchar *pdfjs_dir = find_pdfjs_dir();
     if (pdfjs_dir == NULL) {
-        pdf_demo_error(demo,
-                       "No PDF.js distribution found.\n\n"
-                       "Set PDFJS_DIR to a directory containing build/ and web/ "
-                       "from a PDF.js release.");
+        const gchar *from_env = g_getenv("PDFJS_DIR");
+
+        if (from_env != NULL && *from_env != '\0') {
+            pdf_demo_error(demo,
+                           "PDFJS_DIR is set to \"%s\", but there is no "
+                           "web/viewer.html there.\n\n"
+                           "It must name the root of a PDF.js release — the "
+                           "directory holding build/ and web/ — not the web/ "
+                           "subdirectory itself.",
+                           from_env);
+        } else {
+            pdf_demo_error(demo,
+                           "No PDF.js distribution found.\n\n"
+                           "Set PDFJS_DIR to the root of a PDF.js release: the "
+                           "directory containing build/ and web/.");
+        }
         return FALSE;
     }
 
