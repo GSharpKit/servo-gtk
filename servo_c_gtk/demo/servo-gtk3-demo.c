@@ -173,6 +173,8 @@ ensure_pdf_server(PdfDemo *demo)
         "  \"defaultZoomValue\": \"page-width\""
         "}");
 
+    servo_pdf_server_set_viewer_toolbar_visible(demo->server, TRUE);
+
     gchar *origin = servo_pdf_server_origin(demo->server);
     g_print("PDF server listening on %s\n", origin != NULL ? origin : "(unknown)");
     servo_string_free(origin);

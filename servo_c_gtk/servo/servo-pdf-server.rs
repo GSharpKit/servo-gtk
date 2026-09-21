@@ -116,6 +116,9 @@ struct ServerConfig {
     /// `<meta>` CSP. Off by default; see
     /// [`servo_pdf_server_set_relax_style_csp`].
     relax_style_csp: AtomicBool,
+    /// Whether to hide the PDF.js viewer's own toolbar, leaving just the pages.
+    /// Off by default; see [`servo_pdf_server_set_viewer_toolbar_visible`].
+    hide_toolbar: AtomicBool,
 }
 
 /// A running loopback HTTP server. Created by [`servo_pdf_server_start`] and
@@ -189,6 +192,7 @@ fn start_server(
         documents: RwLock::new(HashMap::new()),
         viewer_preferences: RwLock::new(None),
         relax_style_csp: AtomicBool::new(false),
+        hide_toolbar: AtomicBool::new(false),
     });
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -488,8 +492,19 @@ fn file_response(
         if file.read_to_string(&mut css).is_err() {
             return error_response(500);
         }
-        if css.contains("mask-image:") {
-            let css = inline_mask_icon_fallback(&css);
+
+        let masks = css.contains("mask-image:");
+        let hide_chrome = config.hide_toolbar.load(Ordering::Relaxed);
+
+        if masks || hide_chrome {
+            if masks {
+                css = inline_mask_icon_fallback(&css);
+            }
+            if hide_chrome {
+                // Appended last so it wins over the distribution's own rules
+                // without needing to care where they were defined.
+                css.push_str(VIEWER_CHROME_HIDDEN_CSS);
+            }
             return Response::new(200)
                 .header("Content-Type", content_type)
                 .header("Cache-Control", "no-store")
@@ -497,7 +512,8 @@ fn file_response(
                 .header("X-Content-Type-Options", "nosniff")
                 .with_body(Body::Bytes(css.into_bytes()));
         }
-        // No masking in this sheet: fall through and serve the file as-is,
+
+        // Nothing to rewrite: fall through and serve the file as-is,
         // cacheable and range-able like any other asset.
         if file.seek(SeekFrom::Start(0)).is_err() {
             return error_response(500);
@@ -756,6 +772,24 @@ fn relax_style_csp(html: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// Rules appended to the viewer's stylesheet to strip its chrome.
+///
+/// The viewer's whole layout keys off `--toolbar-height`: the toolbar is that
+/// tall and `#viewerContainer` is inset from the top by the same amount. So
+/// zeroing the variable as well as hiding the bar leaves the pages filling the
+/// window with no gap where the toolbar used to be.
+///
+/// Hiding `#toolbarContainer` is enough to take the secondary toolbar, the
+/// views manager and the loading bar with it — they are all nested inside it.
+/// The sidebar is a sibling and so needs its own rule; its only toggle lives in
+/// the toolbar, but PDF.js also opens it from the keyboard, which would
+/// otherwise leave it on screen with no way to dismiss it.
+const VIEWER_CHROME_HIDDEN_CSS: &str = "\n\
+/* servo-pdf-server: embedder requested a chromeless viewer */\n\
+:root{--toolbar-height:0px !important}\n\
+#toolbarContainer{display:none !important}\n\
+#sidebarContainer{display:none !important}\n";
 
 /// Give every `mask-image` declaration a `background-image` equivalent.
 ///
@@ -1528,6 +1562,34 @@ pub unsafe extern "C" fn servo_pdf_server_set_relax_style_csp(
     }
 }
 
+/// Show or hide the PDF.js viewer's own toolbar. Visible by default.
+///
+/// Hiding it leaves just the document, filling the window — the right shape
+/// when the host application provides its own controls (its own print action,
+/// scrollbars, page navigation) and the viewer's toolbar would only duplicate
+/// them.
+///
+/// This takes the secondary toolbar, the views manager and the loading bar with
+/// it, since PDF.js nests them inside the toolbar, and hides the sidebar too:
+/// its only on-screen toggle is in the toolbar, but PDF.js still opens it from
+/// the keyboard, which would otherwise strand it on screen.
+///
+/// Keyboard shortcuts and the viewer's own behaviour are untouched — this is
+/// presentation only. To drop features rather than hide them, use
+/// [`servo_pdf_server_set_viewer_preferences`].
+///
+/// # Safety
+/// `server` must be NULL or a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_pdf_server_set_viewer_toolbar_visible(
+    server: *mut ServoPdfServerHandle,
+    visible: bool,
+) {
+    if let Some(server) = unsafe { as_server(server) } {
+        server.config.hide_toolbar.store(!visible, Ordering::Relaxed);
+    }
+}
+
 /// Seed PDF.js viewer preferences for every page served from `/pdfjs`.
 ///
 /// `preferences_json` is a JSON **object** of PDF.js preference names to
@@ -1969,6 +2031,39 @@ mod tests {
         // Sheets without masking are returned untouched.
         let plain = "a{color:red}";
         assert_eq!(inline_mask_icon_fallback(plain), plain);
+    }
+
+    #[test]
+    fn the_toolbar_can_be_hidden() {
+        let root = fixture("chrome");
+        std::fs::write(root.join("pdfjs/web/viewer.css"), "#a{mask-image:var(--i)}")
+            .expect("stylesheet");
+        let server = start_server(&root.join("pdfjs"), None).expect("server starts");
+        let address = server.address;
+        let token = server.config.token.clone();
+        let handle = &server as *const ServoPdfServerHandle as *mut ServoPdfServerHandle;
+
+        // Visible by default: no chrome rules, but the icon fallback is there.
+        let (_, css) = get(address, &format!("/{token}/pdfjs/web/viewer.css"));
+        let css = String::from_utf8_lossy(&css);
+        assert!(!css.contains("--toolbar-height"), "{css}");
+        assert!(css.contains("background-image:var(--i)"), "{css}");
+
+        unsafe { servo_pdf_server_set_viewer_toolbar_visible(handle, false) };
+        let (head, css) = get(address, &format!("/{token}/pdfjs/web/viewer.css"));
+        let css = String::from_utf8_lossy(&css);
+        assert!(head.contains("Content-Type: text/css"), "{head}");
+        assert!(css.contains("--toolbar-height:0px !important"), "{css}");
+        assert!(css.contains("#toolbarContainer{display:none !important}"), "{css}");
+        // The icon fallback must survive alongside it.
+        assert!(css.contains("background-image:var(--i)"), "{css}");
+
+        unsafe { servo_pdf_server_set_viewer_toolbar_visible(handle, true) };
+        let (_, css) = get(address, &format!("/{token}/pdfjs/web/viewer.css"));
+        assert!(!String::from_utf8_lossy(&css).contains("--toolbar-height"));
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

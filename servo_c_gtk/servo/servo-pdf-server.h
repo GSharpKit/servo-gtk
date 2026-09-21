@@ -173,6 +173,28 @@ bool servo_pdf_server_remove_document(ServoPdfServerHandle *server,
                                       const char           *name);
 
 /*
+ * Show or hide the PDF.js viewer's own toolbar. Visible by default.
+ *
+ * Hiding it leaves just the document, filling the window — the right shape when
+ * the host application provides its own controls (its own print action,
+ * scrollbars, page navigation) and the viewer's toolbar would only duplicate
+ * them.
+ *
+ * This takes the secondary toolbar, the views manager and the loading bar with
+ * it, since PDF.js nests them inside the toolbar, and hides the sidebar too:
+ * its only on-screen toggle is in the toolbar, but PDF.js still opens it from
+ * the keyboard, which would otherwise strand it on screen.
+ *
+ * Keyboard shortcuts and the viewer's own behaviour are untouched — this is
+ * presentation only. To drop features rather than hide them, use
+ * servo_pdf_server_set_viewer_preferences(); for example
+ * "enableScripting": false stops PDF JavaScript running at all, whereas hiding
+ * the toolbar only removes the buttons.
+ */
+void servo_pdf_server_set_viewer_toolbar_visible(ServoPdfServerHandle *server,
+                                                 bool                  visible);
+
+/*
  * Add 'unsafe-inline' to the style-src of PDF.js's own <meta> CSP.
  *
  * THIS RELAXES A SECURITY CONTROL AND IS OFF BY DEFAULT. It exists because of a
