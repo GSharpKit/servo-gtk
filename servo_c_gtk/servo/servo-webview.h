@@ -76,6 +76,34 @@ void servo_webview_set_url_changed_callback(ServoWebViewHandle     *webview,
                                             ServoUrlChangedCallback callback,
                                             void                   *user_data);
 
+/*
+ * Console log levels passed to ServoConsoleMessageCallback. Part of the ABI;
+ * keep in sync with the `servo_console` module in servo-webview.rs.
+ */
+typedef enum {
+    SERVO_CONSOLE_LOG   = 0,
+    SERVO_CONSOLE_DEBUG = 1,
+    SERVO_CONSOLE_INFO  = 2,
+    SERVO_CONSOLE_WARN  = 3,
+    SERVO_CONSOLE_ERROR = 4,
+    SERVO_CONSOLE_TRACE = 5,
+    SERVO_CONSOLE_DIR   = 6
+} ServoConsoleLevel;
+
+/*
+ * Invoked for every console.* message logged by the page. `message` is a
+ * NUL-terminated UTF-8 string valid only for the duration of the call.
+ * Indispensable when debugging a page that renders blank: without it, script
+ * errors and warnings are discarded.
+ */
+typedef void (*ServoConsoleMessageCallback)(uint32_t    level,
+                                            const char *message,
+                                            void       *user_data);
+
+void servo_webview_set_console_message_callback(ServoWebViewHandle         *webview,
+                                                ServoConsoleMessageCallback callback,
+                                                void                       *user_data);
+
 /* Navigation. */
 void servo_webview_load_uri(ServoWebViewHandle *webview, const char *uri);
 void servo_webview_reload(ServoWebViewHandle *webview);

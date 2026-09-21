@@ -4,6 +4,208 @@
 #include <gtk/gtk.h>
 
 #include "servo-gtk3-view.h"
+#include "servo-pdf-server.h"
+#include "servo-webview.h"
+
+/*
+ * Where to look for a PDF.js release when $PDFJS_DIR is not set. Each entry is
+ * a directory containing build/ and web/.
+ */
+static const gchar *const PDFJS_SEARCH_PATH[] = {
+    "/usr/share/pdf.js",
+    "/usr/share/javascript/pdf",
+    "/usr/share/pdfjs",
+    NULL
+};
+
+/* State behind the "Open PDF" button. Owned by the window. */
+typedef struct {
+    ServoGtkWebView      *web_view;
+    GtkWidget            *window;
+    /* Started on first use and kept for the life of the window: restarting it
+     * would change the origin, throwing away Servo's cache of the viewer. */
+    ServoPdfServerHandle *server;
+} PdfDemo;
+
+static void
+pdf_demo_free(gpointer data)
+{
+    PdfDemo *demo = data;
+
+    servo_pdf_server_stop(demo->server);
+    g_free(demo);
+}
+
+static void
+pdf_demo_error(PdfDemo *demo, const gchar *format, ...) G_GNUC_PRINTF(2, 3);
+
+static void
+pdf_demo_error(PdfDemo *demo, const gchar *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    gchar *message = g_strdup_vprintf(format, args);
+    va_end(args);
+
+    g_printerr("%s\n", message);
+
+    GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(demo->window),
+                                               GTK_DIALOG_MODAL,
+                                               GTK_MESSAGE_ERROR,
+                                               GTK_BUTTONS_CLOSE,
+                                               "%s",
+                                               message);
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    g_free(message);
+}
+
+/* Locate a PDF.js release: $PDFJS_DIR first, then the usual system locations. */
+static gchar *
+find_pdfjs_dir(void)
+{
+    const gchar *from_env = g_getenv("PDFJS_DIR");
+
+    if (from_env != NULL && *from_env != '\0') {
+        return g_strdup(from_env);
+    }
+
+    for (gsize i = 0; PDFJS_SEARCH_PATH[i] != NULL; i++) {
+        gchar *viewer = g_build_filename(PDFJS_SEARCH_PATH[i], "web", "viewer.html", NULL);
+        gboolean found = g_file_test(viewer, G_FILE_TEST_IS_REGULAR);
+        g_free(viewer);
+
+        if (found) {
+            return g_strdup(PDFJS_SEARCH_PATH[i]);
+        }
+    }
+
+    return NULL;
+}
+
+/*
+ * Bring up the loopback HTTP server that hosts PDF.js. PDF.js needs a real HTTP
+ * origin — over file:// its worker and module scripts do not load — so the
+ * viewer and the document are both served from 127.0.0.1 on an ephemeral port.
+ */
+static gboolean
+ensure_pdf_server(PdfDemo *demo)
+{
+    if (demo->server != NULL) {
+        return TRUE;
+    }
+
+    gchar *pdfjs_dir = find_pdfjs_dir();
+    if (pdfjs_dir == NULL) {
+        pdf_demo_error(demo,
+                       "No PDF.js distribution found.\n\n"
+                       "Set PDFJS_DIR to a directory containing build/ and web/ "
+                       "from a PDF.js release.");
+        return FALSE;
+    }
+
+    /* No documents_dir: each picked file is published individually below, so
+     * nothing else on disk becomes reachable. */
+    demo->server = servo_pdf_server_start(pdfjs_dir, NULL);
+    if (demo->server == NULL) {
+        pdf_demo_error(demo, "Could not start the PDF server for \"%s\".", pdfjs_dir);
+        g_free(pdfjs_dir);
+        return FALSE;
+    }
+    g_free(pdfjs_dir);
+
+    /*
+     * Servo re-evaluates CSP for the shadow content of <input type="range"> on
+     * every restyle, and PDF.js's viewer has five of them — enough to saturate
+     * the script thread, so pages never finish painting. Widening style-src
+     * avoids that. It relaxes a security control, so the library leaves it off
+     * by default; it is justified here because this server is on loopback and
+     * only serves files the user picked. See servo-pdf-server.h.
+     */
+    servo_pdf_server_set_relax_style_csp(demo->server, TRUE);
+
+    /*
+     * Trim the viewer for an embedded webview. maxCanvasPixels matters most
+     * here: this build rasterises pages on the CPU, so an unbounded high-zoom
+     * canvas is both slow and memory-hungry.
+     */
+    servo_pdf_server_set_viewer_preferences(
+        demo->server,
+        "{"
+        "  \"enableScripting\": false,"
+        "  \"enableXfa\": false,"
+        "  \"sidebarViewOnLoad\": 0,"
+        "  \"annotationEditorMode\": -1,"
+        "  \"maxCanvasPixels\": 16777216,"
+        "  \"defaultZoomValue\": \"page-width\""
+        "}");
+
+    gchar *origin = servo_pdf_server_origin(demo->server);
+    g_print("PDF server listening on %s\n", origin != NULL ? origin : "(unknown)");
+    servo_string_free(origin);
+
+    return TRUE;
+}
+
+/* Publish one file and point the web view at the PDF.js viewer for it. */
+static void
+open_pdf(PdfDemo *demo, const gchar *path)
+{
+    if (!ensure_pdf_server(demo)) {
+        return;
+    }
+
+    gchar *document = servo_pdf_server_add_document(demo->server, path, NULL);
+    if (document == NULL) {
+        pdf_demo_error(demo, "Could not publish \"%s\".", path);
+        return;
+    }
+
+    gchar *uri = servo_pdf_server_viewer_url(demo->server, document, "zoom=page-width");
+    servo_string_free(document);
+
+    if (uri == NULL) {
+        pdf_demo_error(demo, "Could not build a viewer URL for \"%s\".", path);
+        return;
+    }
+
+    servo_gtk_web_view_load_uri(demo->web_view, uri);
+    servo_string_free(uri);
+}
+
+/* "Open PDF" clicked: pick a file, then hand it to PDF.js. */
+static void
+on_open_pdf_clicked(GtkButton *button, gpointer user_data)
+{
+    PdfDemo *demo = user_data;
+
+    (void) button;
+
+    GtkWidget *chooser = gtk_file_chooser_dialog_new("Open PDF",
+                                                     GTK_WINDOW(demo->window),
+                                                     GTK_FILE_CHOOSER_ACTION_OPEN,
+                                                     "_Cancel", GTK_RESPONSE_CANCEL,
+                                                     "_Open", GTK_RESPONSE_ACCEPT,
+                                                     NULL);
+
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "PDF documents");
+    gtk_file_filter_add_mime_type(filter, "application/pdf");
+    gtk_file_filter_add_pattern(filter, "*.pdf");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), filter);
+
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT) {
+        gchar *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
+
+        gtk_widget_hide(chooser);
+        if (path != NULL) {
+            open_pdf(demo, path);
+            g_free(path);
+        }
+    }
+
+    gtk_widget_destroy(chooser);
+}
 
 /* Navigate the web view to the URL typed in the entry (Enter pressed). */
 static void
@@ -102,7 +304,9 @@ activate(GtkApplication *app, gpointer user_data)
     GtkWidget  *url_bar;
     GtkWidget  *url_entry;
     GtkWidget  *color_button;
+    GtkWidget  *pdf_button;
     GtkWidget  *web_view;
+    PdfDemo    *pdf_demo;
     const char *initial_uri = "https://servo.org";
 
     window = gtk_application_window_new(app);
@@ -146,6 +350,18 @@ activate(GtkApplication *app, gpointer user_data)
     gtk_widget_set_tooltip_text(color_button, "Set the color of all <h1> headings");
     g_signal_connect(color_button, "color-set", G_CALLBACK(on_color_set), web_view);
     gtk_box_pack_start(GTK_BOX(url_bar), color_button, FALSE, FALSE, 0);
+
+    /* "Open PDF" serves the picked file, and PDF.js itself, from a loopback
+     * HTTP server; the state it needs lives as long as the window. */
+    pdf_demo = g_new0(PdfDemo, 1);
+    pdf_demo->web_view = SERVO_GTK_WEB_VIEW(web_view);
+    pdf_demo->window = window;
+    g_object_set_data_full(G_OBJECT(window), "pdf-demo", pdf_demo, pdf_demo_free);
+
+    pdf_button = gtk_button_new_with_mnemonic("Open _PDF");
+    gtk_widget_set_tooltip_text(pdf_button, "Open a PDF file in the PDF.js viewer");
+    g_signal_connect(pdf_button, "clicked", G_CALLBACK(on_open_pdf_clicked), pdf_demo);
+    gtk_box_pack_start(GTK_BOX(url_bar), pdf_button, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(box), url_bar, FALSE, FALSE, 0);
 

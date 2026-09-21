@@ -28,13 +28,20 @@ use std::sync::Once;
 
 use euclid::Point2D;
 use servo::{
-    Code, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, JSValue, JavaScriptEvaluationError,
+    Code, ConsoleLogLevel, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, JSValue,
+    JavaScriptEvaluationError,
     Key, KeyState, KeyboardEvent, Location, Modifiers, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseMoveEvent, NamedKey, PrefValue, Preferences, RenderingContext, Scroll,
     Servo, ServoBuilder, SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate,
     WebViewPoint, WebViewVector,
 };
 use url::Url;
+
+/// Loopback HTTP server used to host the PDF.js viewer and local documents over
+/// a real HTTP origin (see `servo-pdf-server.h`). It is self-contained: it
+/// shares no state with the webview and may be driven from any thread.
+#[path = "servo-pdf-server.rs"]
+mod pdf_server;
 
 /// Called once per rendered frame with a tightly-packed RGBA8 buffer.
 ///
@@ -55,6 +62,29 @@ pub type ServoCursorChangedCallback =
 /// valid only for the duration of the call; copy it before returning.
 pub type ServoUrlChangedCallback =
     extern "C" fn(url: *const c_char, user_data: *mut c_void);
+
+/// Called for every `console.*` message logged by the page. `level` is a
+/// `SERVO_CONSOLE_*` value and `message` is a NUL-terminated UTF-8 string valid
+/// only for the duration of the call.
+pub type ServoConsoleMessageCallback =
+    extern "C" fn(level: u32, message: *const c_char, user_data: *mut c_void);
+
+/// `SERVO_CONSOLE_*` levels, part of the ABI; keep in sync with
+/// `servo-webview.h`.
+mod servo_console {
+    pub const LOG: u32 = 0;
+    pub const DEBUG: u32 = 1;
+    pub const INFO: u32 = 2;
+    pub const WARN: u32 = 3;
+    pub const ERROR: u32 = 4;
+    pub const TRACE: u32 = 5;
+    pub const DIR: u32 = 6;
+}
+
+struct ConsoleCallback {
+    func: ServoConsoleMessageCallback,
+    user_data: *mut c_void,
+}
 
 struct FrameCallback {
     func: ServoFrameReadyCallback,
@@ -78,6 +108,7 @@ struct EmbedderDelegate {
     frame_callback: RefCell<Option<FrameCallback>>,
     cursor_callback: RefCell<Option<CursorCallback>>,
     url_callback: RefCell<Option<UrlCallback>>,
+    console_callback: RefCell<Option<ConsoleCallback>>,
 }
 
 impl EmbedderDelegate {
@@ -87,6 +118,7 @@ impl EmbedderDelegate {
             frame_callback: RefCell::new(None),
             cursor_callback: RefCell::new(None),
             url_callback: RefCell::new(None),
+            console_callback: RefCell::new(None),
         }
     }
 }
@@ -122,6 +154,31 @@ impl WebViewDelegate for EmbedderDelegate {
             .map(|c| (c.func, c.user_data));
         if let Some((func, user_data)) = cb {
             func(data.as_ptr(), width, height, user_data);
+        }
+    }
+
+    fn show_console_message(&self, _webview: WebView, level: ConsoleLogLevel, message: String) {
+        let Some(cb) = self
+            .console_callback
+            .borrow()
+            .as_ref()
+            .map(|c| (c.func, c.user_data))
+        else {
+            return;
+        };
+        let level = match level {
+            ConsoleLogLevel::Log => servo_console::LOG,
+            ConsoleLogLevel::Debug => servo_console::DEBUG,
+            ConsoleLogLevel::Info => servo_console::INFO,
+            ConsoleLogLevel::Warn => servo_console::WARN,
+            ConsoleLogLevel::Error => servo_console::ERROR,
+            ConsoleLogLevel::Trace => servo_console::TRACE,
+            ConsoleLogLevel::Dir => servo_console::DIR,
+        };
+        // A message containing a NUL cannot be passed on; drop it rather than
+        // truncating silently at the NUL.
+        if let Ok(message) = CString::new(message) {
+            (cb.0)(level, message.as_ptr(), cb.1);
         }
     }
 
@@ -420,6 +477,24 @@ pub unsafe extern "C" fn servo_webview_set_url_changed_callback(
 ///
 /// # Safety
 /// `webview` must be a valid handle and `uri` a valid NUL-terminated C string.
+/// Register the console-message callback, invoked for every `console.*` call
+/// made by the page. Pass a NULL `callback` to clear it.
+///
+/// # Safety
+/// `webview` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_set_console_message_callback(
+    webview: *mut ServoWebViewHandle,
+    callback: Option<ServoConsoleMessageCallback>,
+    user_data: *mut c_void,
+) {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return;
+    };
+    *handle.delegate.console_callback.borrow_mut() =
+        callback.map(|func| ConsoleCallback { func, user_data });
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn servo_webview_load_uri(
     webview: *mut ServoWebViewHandle,

@@ -358,8 +358,9 @@ function(add_servo_gtk_library)
             DESTINATION include/${lib}
     )
 
-    # C ABI header for the Rust wrapper (libservoshell).
-    install(FILES servo/servo-webview.h
+    # C ABI headers for the Rust wrapper (libservoshell): the webview itself and
+    # the loopback HTTP server used to host PDF.js over a real HTTP origin.
+    install(FILES servo/servo-webview.h servo/servo-pdf-server.h
             DESTINATION include/${lib}
     )
 
