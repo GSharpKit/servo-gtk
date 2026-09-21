@@ -32,7 +32,13 @@
 enum {
     PROP_0,
     PROP_URI,
-    N_PROPERTIES
+    N_PROPERTIES,
+    /* GtkScrollable, overridden rather than installed, so these deliberately
+     * sit past N_PROPERTIES and have no entry in `properties`. */
+    PROP_HADJUSTMENT,
+    PROP_VADJUSTMENT,
+    PROP_HSCROLL_POLICY,
+    PROP_VSCROLL_POLICY
 };
 
 static GParamSpec *properties[N_PROPERTIES] = { NULL };
@@ -44,7 +50,68 @@ enum {
 
 static guint signals[N_SIGNALS] = { 0 };
 
-G_DEFINE_TYPE(ServoGtkWebView, servo_gtk_web_view, GTK_TYPE_DRAWING_AREA)
+/*
+ * Scroll state, kept in the (previously unused) private pointer so the public
+ * struct keeps its layout.
+ *
+ * Servo 0.5.0 has no API for the scroll offset or the scrollable extent: it
+ * only accepts relative scroll events. The numbers a scrollbar needs therefore
+ * come from the page itself, by evaluating a small script on a timer, and a
+ * drag is applied by assigning scrollLeft/scrollTop the same way. That also
+ * targets the right element on pages that scroll an inner container rather
+ * than the document - which is exactly what the PDF.js viewer does.
+ */
+struct _ServoGtkWebViewPrivate {
+    GtkAdjustment *hadjustment;
+    GtkAdjustment *vadjustment;
+    guint          hscroll_policy : 1;
+    guint          vscroll_policy : 1;
+    guint          poll_id;
+    /* A metrics round-trip is in flight; do not queue another. */
+    gboolean       metrics_pending;
+    /* Adjustments are being updated from the page, so value-changed must not
+     * be echoed back to it. */
+    gboolean       syncing;
+    /* Last pointer position, because GtkEventControllerScroll does not carry
+     * one and Servo scrolls whatever sits under the given point. */
+    gdouble        pointer_x;
+    gdouble        pointer_y;
+};
+
+G_DEFINE_TYPE_WITH_CODE(ServoGtkWebView, servo_gtk_web_view, GTK_TYPE_DRAWING_AREA,
+                        G_IMPLEMENT_INTERFACE(GTK_TYPE_SCROLLABLE, NULL))
+
+/*
+ * Report the scroll geometry of whatever the page actually scrolls, as
+ * [left, top, scrollWidth, scrollHeight, clientWidth, clientHeight].
+ *
+ * Usually that is the document, but a viewer app often scrolls an inner
+ * overflow container instead (PDF.js uses #viewerContainer), so fall back to
+ * the largest scrollable element. The choice is cached on the window because
+ * this runs several times a second, and revalidated whenever it stops being
+ * scrollable or leaves the document.
+ */
+static const gchar *SERVO_GTK_SCROLL_METRICS_JS =
+    "(function(){"
+    "var d=document,w=window;"
+    "function sc(c){return !!c&&(c.scrollHeight>c.clientHeight+1||c.scrollWidth>c.clientWidth+1)}"
+    "function ar(c){return c?c.clientWidth*c.clientHeight:0}"
+    /* Only a scroller filling a decent share of the viewport is the page's
+       main one. Without this floor an incidental little overflow box - a
+       toolbar dropdown mid-load - gets latched onto and never released. */
+    "var min=0.25*w.innerWidth*w.innerHeight,e=w.__servoGtkScroller;"
+    "if(!e||!e.isConnected||!sc(e)||ar(e)<min){"
+    "e=d.scrollingElement||d.documentElement;"
+    "if(!sc(e)){var best=null,ba=min,els=d.querySelectorAll('div,main,section,body');"
+    "for(var i=0;i<els.length;i++){var c=els[i];"
+    "if(sc(c)){var a=ar(c);if(a>ba){ba=a;best=c}}}"
+    "if(best)e=best}"
+    "w.__servoGtkScroller=e}"
+    "return e?[e.scrollLeft,e.scrollTop,e.scrollWidth,e.scrollHeight,e.clientWidth,e.clientHeight]:[0,0,0,0,0,0]"
+    "})()";
+
+/* How often the page is asked for its scroll geometry, in milliseconds. */
+#define SERVO_GTK_SCROLL_POLL_MS 200
 
 /* Matches GdkPixbufDestroyNotify; frees the RGBA buffer owned by the pixbuf. */
 static void
@@ -139,6 +206,169 @@ servo_gtk_web_view_tick(GtkWidget     *widget,
     return G_SOURCE_CONTINUE;
 }
 
+/* Forward declaration: the poll timer is started/stopped as adjustments come
+ * and go, and as Servo is created and torn down. */
+static void servo_gtk_web_view_update_scroll_polling(ServoGtkWebView *self);
+
+/* Pull up to `count` numbers out of a JSON array such as "[0,10,1200,...]". */
+static guint
+servo_gtk_web_view_parse_numbers(const gchar *json, gdouble *out, guint count)
+{
+    guint found = 0;
+
+    if (json == NULL) {
+        return 0;
+    }
+
+    for (const gchar *p = json; *p != '\0' && found < count; p++) {
+        if (g_ascii_isdigit(*p) || *p == '-' || *p == '+' ||
+            (*p == '.' && g_ascii_isdigit(p[1]))) {
+            gchar *end = NULL;
+            gdouble value = g_ascii_strtod(p, &end);
+
+            if (end == p) {
+                continue;
+            }
+            out[found++] = value;
+            p = end - 1;
+        }
+    }
+
+    return found;
+}
+
+/* Result of the metrics script: push the page's geometry into the adjustments. */
+static void
+servo_gtk_web_view_on_scroll_metrics(const char *result_json,
+                                     const char *error,
+                                     void       *user_data)
+{
+    ServoGtkWebView *self = user_data;
+    gdouble          m[6];
+
+    self->priv->metrics_pending = FALSE;
+
+    if (error != NULL || servo_gtk_web_view_parse_numbers(result_json, m, 6) != 6) {
+        g_object_unref(self);
+        return;
+    }
+
+    gdouble left = m[0], top = m[1];
+    gdouble full_width = m[2], full_height = m[3];
+    gdouble page_width = m[4], page_height = m[5];
+
+    /* Updating an adjustment emits value-changed; that must not be mistaken
+     * for the user dragging the scrollbar. */
+    self->priv->syncing = TRUE;
+
+    if (self->priv->hadjustment != NULL) {
+        gtk_adjustment_configure(self->priv->hadjustment, left, 0.0,
+                                 MAX(full_width, page_width),
+                                 page_width / 10.0, page_width * 0.9, page_width);
+    }
+    if (self->priv->vadjustment != NULL) {
+        gtk_adjustment_configure(self->priv->vadjustment, top, 0.0,
+                                 MAX(full_height, page_height),
+                                 page_height / 10.0, page_height * 0.9, page_height);
+    }
+
+    self->priv->syncing = FALSE;
+    g_object_unref(self);
+}
+
+static gboolean
+servo_gtk_web_view_poll_scroll(gpointer data)
+{
+    ServoGtkWebView *self = data;
+
+    if (self->servo == NULL || self->priv->metrics_pending) {
+        return G_SOURCE_CONTINUE;
+    }
+
+    self->priv->metrics_pending = TRUE;
+    servo_webview_evaluate_script(self->servo, SERVO_GTK_SCROLL_METRICS_JS,
+                                  servo_gtk_web_view_on_scroll_metrics,
+                                  g_object_ref(self));
+
+    return G_SOURCE_CONTINUE;
+}
+
+/*
+ * evaluate_script does nothing at all when the callback is NULL, so a
+ * fire-and-forget script still needs somewhere to deliver its result.
+ */
+static void
+servo_gtk_web_view_ignore_script_result(const char *result_json,
+                                        const char *error,
+                                        void       *user_data)
+{
+    (void) result_json;
+    (void) error;
+    (void) user_data;
+}
+
+/* The user moved a scrollbar: tell the page to scroll there. */
+static void
+servo_gtk_web_view_on_adjustment_changed(GtkAdjustment *adjustment, gpointer data)
+{
+    ServoGtkWebView *self = data;
+
+    if (self->priv->syncing || self->servo == NULL) {
+        return;
+    }
+
+    gboolean horizontal = (adjustment == self->priv->hadjustment);
+    gchar   *script = g_strdup_printf(
+        "(function(){var e=window.__servoGtkScroller||document.scrollingElement;"
+        "if(e){e.%s=%.2f}return 0})()",
+        horizontal ? "scrollLeft" : "scrollTop",
+        gtk_adjustment_get_value(adjustment));
+
+    servo_webview_evaluate_script(self->servo, script,
+                                  servo_gtk_web_view_ignore_script_result, NULL);
+    g_free(script);
+}
+
+/* Poll only while it can do something: Servo exists and someone is listening. */
+static void
+servo_gtk_web_view_update_scroll_polling(ServoGtkWebView *self)
+{
+    gboolean wanted = self->servo != NULL &&
+        (self->priv->hadjustment != NULL || self->priv->vadjustment != NULL);
+
+    if (wanted && self->priv->poll_id == 0) {
+        self->priv->poll_id = g_timeout_add(SERVO_GTK_SCROLL_POLL_MS,
+                                            servo_gtk_web_view_poll_scroll, self);
+    } else if (!wanted && self->priv->poll_id != 0) {
+        g_source_remove(self->priv->poll_id);
+        self->priv->poll_id = 0;
+    }
+}
+
+static void
+servo_gtk_web_view_set_adjustment(ServoGtkWebView  *self,
+                                  GtkAdjustment   **slot,
+                                  GtkAdjustment    *adjustment)
+{
+    if (*slot == adjustment) {
+        return;
+    }
+
+    if (*slot != NULL) {
+        g_signal_handlers_disconnect_by_func(
+            *slot, servo_gtk_web_view_on_adjustment_changed, self);
+        g_clear_object(slot);
+    }
+
+    if (adjustment != NULL) {
+        *slot = g_object_ref_sink(adjustment);
+        g_signal_connect(*slot, "value-changed",
+                         G_CALLBACK(servo_gtk_web_view_on_adjustment_changed), self);
+    }
+
+    servo_gtk_web_view_update_scroll_polling(self);
+}
+
 static void
 servo_gtk_web_view_set_property(GObject      *object,
                                 guint         property_id,
@@ -150,6 +380,24 @@ servo_gtk_web_view_set_property(GObject      *object,
     switch (property_id) {
     case PROP_URI:
         servo_gtk_web_view_load_uri(self, g_value_get_string(value));
+        break;
+
+    case PROP_HADJUSTMENT:
+        servo_gtk_web_view_set_adjustment(self, &self->priv->hadjustment,
+                                          g_value_get_object(value));
+        break;
+
+    case PROP_VADJUSTMENT:
+        servo_gtk_web_view_set_adjustment(self, &self->priv->vadjustment,
+                                          g_value_get_object(value));
+        break;
+
+    case PROP_HSCROLL_POLICY:
+        self->priv->hscroll_policy = g_value_get_enum(value);
+        break;
+
+    case PROP_VSCROLL_POLICY:
+        self->priv->vscroll_policy = g_value_get_enum(value);
         break;
 
     default:
@@ -171,6 +419,22 @@ servo_gtk_web_view_get_property(GObject    *object,
         g_value_set_string(value, self->uri);
         break;
 
+    case PROP_HADJUSTMENT:
+        g_value_set_object(value, self->priv->hadjustment);
+        break;
+
+    case PROP_VADJUSTMENT:
+        g_value_set_object(value, self->priv->vadjustment);
+        break;
+
+    case PROP_HSCROLL_POLICY:
+        g_value_set_enum(value, self->priv->hscroll_policy);
+        break;
+
+    case PROP_VSCROLL_POLICY:
+        g_value_set_enum(value, self->priv->vscroll_policy);
+        break;
+
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
         break;
@@ -185,6 +449,15 @@ servo_gtk_web_view_dispose(GObject *object)
     if (self->tick_id != 0) {
         gtk_widget_remove_tick_callback(GTK_WIDGET(self), self->tick_id);
         self->tick_id = 0;
+    }
+
+    if (self->priv != NULL) {
+        if (self->priv->poll_id != 0) {
+            g_source_remove(self->priv->poll_id);
+            self->priv->poll_id = 0;
+        }
+        servo_gtk_web_view_set_adjustment(self, &self->priv->hadjustment, NULL);
+        servo_gtk_web_view_set_adjustment(self, &self->priv->vadjustment, NULL);
     }
 
     g_clear_object(&self->frame);
@@ -203,6 +476,7 @@ servo_gtk_web_view_finalize(GObject *object)
     ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(object);
 
     g_clear_pointer(&self->uri, g_free);
+    g_clear_pointer(&self->priv, g_free);
 
     G_OBJECT_CLASS(servo_gtk_web_view_parent_class)->finalize(object);
 }
@@ -266,6 +540,8 @@ servo_gtk_web_view_on_resize(GtkDrawingArea *area,
                 self->servo, servo_gtk_web_view_on_cursor_changed, self);
             servo_webview_set_url_changed_callback(
                 self->servo, servo_gtk_web_view_on_url_changed, self);
+            /* Scroll geometry can only be read once there is a page to ask. */
+            servo_gtk_web_view_update_scroll_polling(self);
         }
     } else {
         servo_webview_resize(self->servo, w, h);
@@ -282,6 +558,9 @@ servo_gtk_web_view_on_motion(GtkEventControllerMotion *controller,
     ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
 
     (void) controller;
+
+    self->priv->pointer_x = x;
+    self->priv->pointer_y = y;
 
     if (self->servo != NULL) {
         servo_webview_pointer_move(self->servo, x, y);
@@ -342,7 +621,8 @@ servo_gtk_web_view_on_scroll(GtkEventControllerScroll *controller,
     (void) controller;
 
     if (self->servo != NULL) {
-        servo_webview_scroll(self->servo, dx, dy);
+        servo_webview_scroll(self->servo, dx, dy,
+                             self->priv->pointer_x, self->priv->pointer_y);
     }
 
     return TRUE;
@@ -497,6 +777,13 @@ servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
 
     g_object_class_install_properties(object_class, N_PROPERTIES, properties);
 
+    /* GtkScrollable: implementing it is what lets the widget simply be dropped
+     * into a GtkScrolledWindow and get real scrollbars. */
+    g_object_class_override_property(object_class, PROP_HADJUSTMENT, "hadjustment");
+    g_object_class_override_property(object_class, PROP_VADJUSTMENT, "vadjustment");
+    g_object_class_override_property(object_class, PROP_HSCROLL_POLICY, "hscroll-policy");
+    g_object_class_override_property(object_class, PROP_VSCROLL_POLICY, "vscroll-policy");
+
     /**
      * ServoGtkWebView::uri-changed:
      * @self: the #ServoGtkWebView
@@ -522,6 +809,8 @@ servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
 static void
 servo_gtk_web_view_init(ServoGtkWebView *self)
 {
+    self->priv = g_new0(ServoGtkWebViewPrivate, 1);
+
     GtkWidget *widget = GTK_WIDGET(self);
 
     gtk_widget_set_focusable(widget, TRUE);

@@ -122,7 +122,16 @@ void servo_webview_pointer_button(ServoWebViewHandle *webview,
                                   bool                pressed,
                                   double              x,
                                   double              y);
-void servo_webview_scroll(ServoWebViewHandle *webview, double dx, double dy);
+/*
+ * Scroll by (dx, dy) at surface position (x, y). Servo scrolls the scrollable
+ * area under that point, so it must be the pointer's real position: a fixed
+ * point scrolls whatever sits there instead of what the user is pointing at.
+ */
+void servo_webview_scroll(ServoWebViewHandle *webview,
+                          double              dx,
+                          double              dy,
+                          double              x,
+                          double              y);
 
 /*
  * Named keys understood by servo_webview_key(). SERVO_KEY_CHARACTER means the

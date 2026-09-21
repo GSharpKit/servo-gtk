@@ -82,9 +82,10 @@ servo_webview_pointer_button(ServoWebViewHandle *webview,
     (void) webview; (void) button; (void) pressed; (void) x; (void) y;
 }
 
-void servo_webview_scroll(ServoWebViewHandle *webview, double dx, double dy)
+void servo_webview_scroll(ServoWebViewHandle *webview, double dx, double dy,
+                          double x, double y)
 {
-    (void) webview; (void) dx; (void) dy;
+    (void) webview; (void) dx; (void) dy; (void) x; (void) y;
 }
 
 void

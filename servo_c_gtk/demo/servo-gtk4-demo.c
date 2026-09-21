@@ -384,6 +384,7 @@ activate(GtkApplication *app, gpointer user_data)
     GtkWidget  *pdf_button;
     GtkWidget  *print_button;
     GtkWidget  *web_view;
+    GtkWidget  *scrolled;
     PdfDemo    *pdf_demo;
     const char *initial_uri = "https://servo.org";
 
@@ -461,7 +462,18 @@ activate(GtkApplication *app, gpointer user_data)
     /* Print and reflect URL changes reported by Servo (navigation, redirects). */
     g_signal_connect(web_view, "uri-changed", G_CALLBACK(on_web_view_uri_changed), url_entry);
 
-    gtk_box_append(GTK_BOX(box), web_view);
+    /*
+     * ServoGtkWebView implements GtkScrollable, so putting it in a
+     * GtkScrolledWindow is all that is needed to get real scrollbars: the
+     * widget keeps the adjustments in step with whatever the page scrolls.
+     */
+    scrolled = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_hexpand(scrolled, TRUE);
+    gtk_widget_set_vexpand(scrolled, TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), web_view);
+    gtk_box_append(GTK_BOX(box), scrolled);
 
     servo_gtk_web_view_load_uri(SERVO_GTK_WEB_VIEW(web_view), initial_uri);
 
