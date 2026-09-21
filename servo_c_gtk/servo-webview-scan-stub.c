@@ -18,6 +18,7 @@
 #include <stddef.h>
 
 #include "servo-webview.h"
+#include "servo-pdf-server.h"
 
 ServoWebViewHandle *
 servo_webview_new(uint32_t width, uint32_t height, const char *initial_uri)
@@ -115,4 +116,74 @@ servo_webview_evaluate_script(ServoWebViewHandle       *webview,
                               void                     *user_data)
 {
     (void) webview; (void) script; (void) callback; (void) user_data;
+}
+
+/*
+ * The same applies to the loopback PDF host: servo-gtk-pdf-server.c is part of
+ * the scanned sources, so the twin needs these symbols to link. Introspection
+ * only registers the GObject type; it never starts a server.
+ */
+ServoPdfServerHandle *servo_pdf_server_start(const char *pdfjs_dir,
+                                             const char *documents_dir)
+{
+    (void) pdfjs_dir; (void) documents_dir;
+    return NULL;
+}
+
+void servo_pdf_server_stop(ServoPdfServerHandle *server) { (void) server; }
+
+uint16_t servo_pdf_server_port(ServoPdfServerHandle *server)
+{
+    (void) server;
+    return 0;
+}
+
+char *servo_pdf_server_origin(ServoPdfServerHandle *server)
+{
+    (void) server;
+    return NULL;
+}
+
+char *servo_pdf_server_url(ServoPdfServerHandle *server, const char *path)
+{
+    (void) server; (void) path;
+    return NULL;
+}
+
+char *servo_pdf_server_add_document(ServoPdfServerHandle *server,
+                                    const char *file_path, const char *name)
+{
+    (void) server; (void) file_path; (void) name;
+    return NULL;
+}
+
+bool servo_pdf_server_remove_document(ServoPdfServerHandle *server, const char *name)
+{
+    (void) server; (void) name;
+    return false;
+}
+
+char *servo_pdf_server_viewer_url(ServoPdfServerHandle *server,
+                                  const char *document_path, const char *viewer_hash)
+{
+    (void) server; (void) document_path; (void) viewer_hash;
+    return NULL;
+}
+
+bool servo_pdf_server_set_viewer_preferences(ServoPdfServerHandle *server,
+                                             const char *preferences_json)
+{
+    (void) server; (void) preferences_json;
+    return true;
+}
+
+void servo_pdf_server_set_viewer_toolbar_visible(ServoPdfServerHandle *server,
+                                                 bool visible)
+{
+    (void) server; (void) visible;
+}
+
+void servo_pdf_server_set_relax_style_csp(ServoPdfServerHandle *server, bool relax)
+{
+    (void) server; (void) relax;
 }

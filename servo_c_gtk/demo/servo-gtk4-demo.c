@@ -4,8 +4,7 @@
 #include <gtk/gtk.h>
 
 #include "servo-gtk4-view.h"
-#include "servo-pdf-server.h"
-#include "servo-webview.h"
+#include "servo-gtk-pdf-server.h"
 
 
 /*
@@ -25,7 +24,7 @@ typedef struct {
     GtkWidget            *window;
     /* Started on first use and kept for the life of the window: restarting it
      * would change the origin, throwing away Servo's cache of the viewer. */
-    ServoPdfServerHandle *server;
+    ServoGtkPdfServer    *server;
     /* Path of the PDF currently shown, so it can be spooled to a printer. */
     gchar                *current_pdf;
     GtkWidget            *print_button;
@@ -36,7 +35,7 @@ pdf_demo_free(gpointer data)
 {
     PdfDemo *demo = data;
 
-    servo_pdf_server_stop(demo->server);
+    g_clear_object(&demo->server);
     g_free(demo->current_pdf);
     g_free(demo);
 }
@@ -75,11 +74,10 @@ is_pdfjs_dir(const gchar *dir)
 /*
  * Locate a PDF.js release: $PDFJS_DIR first, then the usual system locations.
  *
- * $PDFJS_DIR is validated like any other candidate. Taking it on trust is worse
- * than useless: the server starts happily on any directory that exists, every
- * request 404s, and the viewer is a blank page with nothing to explain it. The
- * easy mistake is naming the release's web/ subdirectory rather than the
- * release root.
+ * An explicit $PDFJS_DIR is handed back as-is, even if it looks wrong, so that
+ * ServoGtkPdfServer can say exactly what is wrong with it. The candidates we
+ * guess at are filtered, since "not a PDF.js directory" is the expected answer
+ * for most of them.
  */
 static gchar *
 find_pdfjs_dir(void)
@@ -87,7 +85,7 @@ find_pdfjs_dir(void)
     const gchar *from_env = g_getenv("PDFJS_DIR");
 
     if (from_env != NULL && *from_env != '\0') {
-        return is_pdfjs_dir(from_env) ? g_strdup(from_env) : NULL;
+        return g_strdup(from_env);
     }
 
     for (gsize i = 0; PDFJS_SEARCH_PATH[i] != NULL; i++) {
@@ -113,34 +111,26 @@ ensure_pdf_server(PdfDemo *demo)
 
     gchar *pdfjs_dir = find_pdfjs_dir();
     if (pdfjs_dir == NULL) {
-        const gchar *from_env = g_getenv("PDFJS_DIR");
-
-        if (from_env != NULL && *from_env != '\0') {
-            pdf_demo_error(demo,
-                           "PDFJS_DIR is set to \"%s\", but there is no "
-                           "web/viewer.html there.\n\n"
-                           "It must name the root of a PDF.js release — the "
-                           "directory holding build/ and web/ — not the web/ "
-                           "subdirectory itself.",
-                           from_env);
-        } else {
-            pdf_demo_error(demo,
-                           "No PDF.js distribution found.\n\n"
-                           "Set PDFJS_DIR to the root of a PDF.js release: the "
-                           "directory containing build/ and web/.");
-        }
+        pdf_demo_error(demo,
+                       "No PDF.js distribution found.\n\n"
+                       "Set PDFJS_DIR to the root of a PDF.js release: the "
+                       "directory containing build/ and web/.");
         return FALSE;
     }
 
     /* No documents_dir: each picked file is published individually below, so
-     * nothing else on disk becomes reachable. */
-    demo->server = servo_pdf_server_start(pdfjs_dir, NULL);
+     * nothing else on disk becomes reachable. The server validates the
+     * directory and reports precisely what is wrong with it. */
+    GError *error = NULL;
+
+    demo->server = servo_gtk_pdf_server_new(pdfjs_dir, NULL, &error);
+    g_free(pdfjs_dir);
+
     if (demo->server == NULL) {
-        pdf_demo_error(demo, "Could not start the PDF server for \"%s\".", pdfjs_dir);
-        g_free(pdfjs_dir);
+        pdf_demo_error(demo, "%s", error->message);
+        g_clear_error(&error);
         return FALSE;
     }
-    g_free(pdfjs_dir);
 
     /*
      * Servo re-evaluates CSP for the shadow content of <input type="range"> on
@@ -148,31 +138,38 @@ ensure_pdf_server(PdfDemo *demo)
      * the script thread, so pages never finish painting. Widening style-src
      * avoids that. It relaxes a security control, so the library leaves it off
      * by default; it is justified here because this server is on loopback and
-     * only serves files the user picked. See servo-pdf-server.h.
+     * only serves files the user picked. See servo-gtk-pdf-server.h.
      */
-    servo_pdf_server_set_relax_style_csp(demo->server, TRUE);
+    servo_gtk_pdf_server_set_relax_style_csp(demo->server, TRUE);
 
     /*
      * Trim the viewer for an embedded webview. maxCanvasPixels matters most
      * here: this build rasterises pages on the CPU, so an unbounded high-zoom
      * canvas is both slow and memory-hungry.
      */
-    servo_pdf_server_set_viewer_preferences(
-        demo->server,
-        "{"
-        "  \"enableScripting\": false,"
-        "  \"enableXfa\": false,"
-        "  \"sidebarViewOnLoad\": 0,"
-        "  \"annotationEditorMode\": -1,"
-        "  \"maxCanvasPixels\": 16777216,"
-        "  \"defaultZoomValue\": \"page-width\""
-        "}");
+    if (!servo_gtk_pdf_server_set_viewer_preferences(
+            demo->server,
+            "{"
+            "  \"enableScripting\": false,"
+            "  \"enableXfa\": false,"
+            "  \"sidebarViewOnLoad\": 0,"
+            "  \"annotationEditorMode\": -1,"
+            "  \"maxCanvasPixels\": 16777216,"
+            "  \"defaultZoomValue\": \"page-width\""
+            "}",
+            &error)) {
+        /* Not fatal — the viewer simply keeps its own defaults. */
+        g_warning("viewer preferences rejected: %s", error->message);
+        g_clear_error(&error);
+    }
 
-    servo_pdf_server_set_viewer_toolbar_visible(demo->server, TRUE);
+    /* PDF.js keeps its own toolbar here. Pass FALSE for a chromeless viewer,
+     * which suits an application that provides the controls itself. */
+    servo_gtk_pdf_server_set_toolbar_visible(demo->server, TRUE);
 
-    gchar *origin = servo_pdf_server_origin(demo->server);
-    g_print("PDF server listening on %s\n", origin != NULL ? origin : "(unknown)");
-    servo_string_free(origin);
+    /* Owned by the server object, so nothing to free. */
+    g_print("PDF server listening on %s\n",
+            servo_gtk_pdf_server_get_origin(demo->server));
 
     return TRUE;
 }
@@ -185,14 +182,18 @@ open_pdf(PdfDemo *demo, const gchar *path)
         return;
     }
 
-    gchar *document = servo_pdf_server_add_document(demo->server, path, NULL);
+    GError *error = NULL;
+    gchar  *document = servo_gtk_pdf_server_add_document(demo->server, path, NULL, &error);
+
     if (document == NULL) {
-        pdf_demo_error(demo, "Could not publish \"%s\".", path);
+        pdf_demo_error(demo, "%s", error->message);
+        g_clear_error(&error);
         return;
     }
 
-    gchar *uri = servo_pdf_server_viewer_url(demo->server, document, "zoom=page-width");
-    servo_string_free(document);
+    gchar *uri = servo_gtk_pdf_server_get_viewer_url(demo->server, document,
+                                                     "zoom=page-width");
+    g_free(document);
 
     if (uri == NULL) {
         pdf_demo_error(demo, "Could not build a viewer URL for \"%s\".", path);
@@ -200,7 +201,7 @@ open_pdf(PdfDemo *demo, const gchar *path)
     }
 
     servo_gtk_web_view_load_uri(demo->web_view, uri);
-    servo_string_free(uri);
+    g_free(uri);
 
     /* Printing spools this same file, so keep it for the Print button. */
     g_free(demo->current_pdf);

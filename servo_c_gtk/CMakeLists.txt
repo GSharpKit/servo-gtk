@@ -469,8 +469,8 @@ add_servo_gtk_library(
         GTK_PREFIX  GTK3
         GTK_PKG     gtk+-3.0
         GIR_INCLUDE Gtk-3.0
-        SOURCES     servo-gtk3-view.c
-        HEADERS     servo-gtk3-view.h
+        SOURCES     servo-gtk3-view.c servo-gtk-pdf-server.c
+        HEADERS     servo-gtk3-view.h servo-gtk-pdf-server.h
 )
 
 add_servo_gtk_library(
@@ -479,8 +479,8 @@ add_servo_gtk_library(
         GTK_PREFIX  GTK4
         GTK_PKG     gtk4
         GIR_INCLUDE Gtk-4.0
-        SOURCES     servo-gtk4-view.c
-        HEADERS     servo-gtk4-view.h
+        SOURCES     servo-gtk4-view.c servo-gtk-pdf-server.c
+        HEADERS     servo-gtk4-view.h servo-gtk-pdf-server.h
 )
 
 # The Rust cdylib (libservoshell) that both libraries link against is built by
