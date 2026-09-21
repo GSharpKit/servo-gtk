@@ -28,6 +28,13 @@ endif()
 # Rust runtime (libservoshell); only the GTK internals differ.
 pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
 pkg_check_modules(GTK4 REQUIRED gtk4)
+
+# gtk-unix-print is what lets the demo hand a PDF straight to a CUPS queue
+# (GtkPrintJob + gtk_print_job_set_source_file), with no rasterisation and no
+# Poppler. It ships with GTK on Unix but does not exist for MinGW/Windows, so
+# it is optional: without it the demo simply builds without its Print button.
+pkg_check_modules(GTK3_UNIX_PRINT QUIET gtk+-unix-print-3.0)
+pkg_check_modules(GTK4_UNIX_PRINT QUIET gtk4-unix-print)
 if(BUILD_GIR)
     pkg_check_modules(GOBJECT_INTROSPECTION REQUIRED gobject-introspection-1.0)
 endif()
@@ -209,6 +216,8 @@ endif()
 #   MAJOR       - GTK major version, e.g. 3 or 4 (names all outputs).
 #   API_VERSION - GIR nsversion, e.g. 3.0 or 4.0.
 #   GTK_PREFIX  - pkg_check_modules prefix to read flags from (GTK3 / GTK4).
+#                 <GTK_PREFIX>_UNIX_PRINT_* supplies the demo's optional
+#                 gtk-unix-print flags when that module was found.
 #   GTK_PKG     - GTK pkg-config module name (gtk+-3.0 / gtk4), for the .pc Requires.
 #   GIR_INCLUDE - GObject-introspection dependency, e.g. Gtk-3.0 / Gtk-4.0.
 #   SOURCES     - C source files.
@@ -412,6 +421,15 @@ function(add_servo_gtk_library)
             PRIVATE
             ${lib}
             ${gtk_libraries})
+
+    # Optional: direct-to-printer PDF spooling (see the top of this file).
+    if(${ARG_GTK_PREFIX}_UNIX_PRINT_FOUND)
+        target_include_directories(${lib}-demo PRIVATE ${${ARG_GTK_PREFIX}_UNIX_PRINT_INCLUDE_DIRS})
+        target_link_libraries(${lib}-demo PRIVATE ${${ARG_GTK_PREFIX}_UNIX_PRINT_LIBRARIES})
+        target_compile_definitions(${lib}-demo PRIVATE HAVE_GTK_UNIX_PRINT)
+    else()
+        message(STATUS "${lib}-demo: gtk-unix-print not found, building without the Print button")
+    endif()
 
     # Installed to <prefix>/bin, it finds servogtkN + libservoshell in the install
     # libdir via a relative rpath.

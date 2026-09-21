@@ -7,6 +7,10 @@
 #include "servo-pdf-server.h"
 #include "servo-webview.h"
 
+#ifdef HAVE_GTK_UNIX_PRINT
+#include <gtk/gtkunixprint.h>
+#endif
+
 /*
  * Where to look for a PDF.js release when $PDFJS_DIR is not set. Each entry is
  * a directory containing build/ and web/.
@@ -25,6 +29,9 @@ typedef struct {
     /* Started on first use and kept for the life of the window: restarting it
      * would change the origin, throwing away Servo's cache of the viewer. */
     ServoPdfServerHandle *server;
+    /* Path of the PDF currently shown, so it can be spooled to a printer. */
+    gchar                *current_pdf;
+    GtkWidget            *print_button;
 } PdfDemo;
 
 static void
@@ -33,6 +40,7 @@ pdf_demo_free(gpointer data)
     PdfDemo *demo = data;
 
     servo_pdf_server_stop(demo->server);
+    g_free(demo->current_pdf);
     g_free(demo);
 }
 
@@ -171,7 +179,110 @@ open_pdf(PdfDemo *demo, const gchar *path)
 
     servo_gtk_web_view_load_uri(demo->web_view, uri);
     servo_string_free(uri);
+
+    /* Printing spools this same file, so keep it for the Print button. */
+    g_free(demo->current_pdf);
+    demo->current_pdf = g_strdup(path);
+    if (demo->print_button != NULL) {
+        gtk_widget_set_sensitive(demo->print_button, TRUE);
+    }
 }
+
+#ifdef HAVE_GTK_UNIX_PRINT
+/*
+ * The spooler finished with the job (or failed to hand it over). Spooling
+ * outlives the print dialog, so this holds a strong reference to the window
+ * rather than the PdfDemo the window owns.
+ */
+static void
+on_print_job_complete(GtkPrintJob *job, gpointer user_data, const GError *error)
+{
+    PdfDemo *demo = g_object_get_data(G_OBJECT(user_data), "pdf-demo");
+
+    (void) job;
+
+    if (error != NULL) {
+        if (demo != NULL) {
+            pdf_demo_error(demo, "Printing failed: %s", error->message);
+        } else {
+            g_printerr("Printing failed: %s\n", error->message);
+        }
+    } else {
+        g_print("PDF sent to the printer\n");
+    }
+}
+
+/*
+ * "Print" clicked: pick a printer, then hand the PDF file itself to it.
+ *
+ * gtk_print_job_set_source_file() spools the bytes on disk straight to the
+ * print backend, so CUPS receives the original PDF. Nothing is rasterised
+ * here, the webview is not involved, and no PDF library is needed — which also
+ * means the output does not depend on how well Servo renders the document.
+ */
+static void
+on_print_clicked(GtkButton *button, gpointer user_data)
+{
+    PdfDemo *demo = user_data;
+
+    (void) button;
+
+    if (demo->current_pdf == NULL) {
+        pdf_demo_error(demo, "Open a PDF first.");
+        return;
+    }
+
+    GtkWidget *dialog = gtk_print_unix_dialog_new("Print PDF", GTK_WINDOW(demo->window));
+    /* The file is spooled verbatim, so page handling is the printer's job. */
+    gtk_print_unix_dialog_set_manual_capabilities(GTK_PRINT_UNIX_DIALOG(dialog),
+                                                  GTK_PRINT_CAPABILITY_COPIES |
+                                                  GTK_PRINT_CAPABILITY_COLLATE |
+                                                  GTK_PRINT_CAPABILITY_REVERSE);
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) != GTK_RESPONSE_OK) {
+        gtk_widget_destroy(dialog);
+        return;
+    }
+
+    GtkPrintUnixDialog *print_dialog = GTK_PRINT_UNIX_DIALOG(dialog);
+    GtkPrinter         *printer = gtk_print_unix_dialog_get_selected_printer(print_dialog);
+    GtkPrintSettings   *settings = gtk_print_unix_dialog_get_settings(print_dialog);
+    GtkPageSetup       *page_setup = gtk_print_unix_dialog_get_page_setup(print_dialog);
+
+    gtk_widget_hide(dialog);
+
+    /* Fail closed rather than spooling a PDF to a queue that cannot take one. */
+    if (printer == NULL) {
+        pdf_demo_error(demo, "No printer selected.");
+    } else if (!gtk_printer_accepts_pdf(printer)) {
+        pdf_demo_error(demo,
+                       "\"%s\" does not accept PDF jobs, and this demo sends the "
+                       "file unchanged.",
+                       gtk_printer_get_name(printer));
+    } else {
+        gchar       *title = g_path_get_basename(demo->current_pdf);
+        GtkPrintJob *job = gtk_print_job_new(title, printer, settings, page_setup);
+        GError      *error = NULL;
+
+        if (!gtk_print_job_set_source_file(job, demo->current_pdf, &error)) {
+            pdf_demo_error(demo, "Could not read \"%s\": %s",
+                           demo->current_pdf, error->message);
+            g_clear_error(&error);
+        } else {
+            /* Takes its own reference; the callback runs when spooling ends. */
+            gtk_print_job_send(job, on_print_job_complete,
+                               g_object_ref(demo->window),
+                               (GDestroyNotify) g_object_unref);
+        }
+
+        g_object_unref(job);
+        g_free(title);
+    }
+
+    g_clear_object(&settings);
+    gtk_widget_destroy(dialog);
+}
+#endif /* HAVE_GTK_UNIX_PRINT */
 
 /* "Open PDF" clicked: pick a file, then hand it to PDF.js. */
 static void
@@ -305,6 +416,9 @@ activate(GtkApplication *app, gpointer user_data)
     GtkWidget  *url_entry;
     GtkWidget  *color_button;
     GtkWidget  *pdf_button;
+#ifdef HAVE_GTK_UNIX_PRINT
+    GtkWidget  *print_button;
+#endif
     GtkWidget  *web_view;
     PdfDemo    *pdf_demo;
     const char *initial_uri = "https://servo.org";
@@ -362,6 +476,17 @@ activate(GtkApplication *app, gpointer user_data)
     gtk_widget_set_tooltip_text(pdf_button, "Open a PDF file in the PDF.js viewer");
     g_signal_connect(pdf_button, "clicked", G_CALLBACK(on_open_pdf_clicked), pdf_demo);
     gtk_box_pack_start(GTK_BOX(url_bar), pdf_button, FALSE, FALSE, 0);
+
+#ifdef HAVE_GTK_UNIX_PRINT
+    /* Insensitive until there is a document to print. */
+    print_button = gtk_button_new_with_mnemonic("P_rint");
+    gtk_widget_set_tooltip_text(print_button,
+                                "Send the open PDF straight to a printer, unmodified");
+    gtk_widget_set_sensitive(print_button, FALSE);
+    g_signal_connect(print_button, "clicked", G_CALLBACK(on_print_clicked), pdf_demo);
+    gtk_box_pack_start(GTK_BOX(url_bar), print_button, FALSE, FALSE, 0);
+    pdf_demo->print_button = print_button;
+#endif
 
     gtk_box_pack_start(GTK_BOX(box), url_bar, FALSE, FALSE, 0);
 
