@@ -52,3 +52,44 @@ surfman = { version = "0.12.3", features = ["sm-angle-default"] }
 [build-dependencies]
 glib-build-tools = "0.22"
 prost-build = "0.13"
+
+# ==========================================================================
+# Build profiles
+# ==========================================================================
+# The whole Servo engine is baked into this one cdylib, so the artifact is
+# dominated by two things: DWARF, and code the linker cannot prove is dead.
+#
+#   * `debug = false` + `strip` removes the debug info. This is by far the
+#     largest term — an unstripped dev build of the engine is >1 GB, and
+#     almost all of it is DWARF from the dependency graph.
+#   * ThinLTO lets the linker see across crate boundaries and drop everything
+#     unreachable from our handful of `#[no_mangle]` exports. Servo pulls in a
+#     lot that a GTK embedder never calls.
+#
+# `panic` deliberately stays at the default `unwind`: the .so is dlopen'd into
+# a host process (GTK app, .NET P/Invoke), and Servo uses catch_unwind
+# internally — `abort` would take the host down with it.
+#
+# `opt-level` stays at 3 rather than "s"/"z". Size-optimizing the layout,
+# style and script crates costs real page-rendering throughput; the LTO and
+# strip settings above give the size win without that trade.
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 4
+debug-assertions = false
+overflow-checks = false
+strip = "debuginfo"
+lto = "thin"
+incremental = false
+# codegen-units = 1 shrinks the result a little further, but under LTO it
+# serialises codegen of the entire Servo graph into one unit — expect a
+# multi-hour link. Left at the default 16.
+
+# The Debug CMake build type maps onto Cargo's `dev` profile (see
+# CARGO_PROFILE_DIR in CMakeLists.txt). Debugging happens on the C side, so
+# keep the engine's DWARF out of the .so here too; set `debug = 2` and drop
+# `strip` locally when you actually need to step through Rust.
+[profile.dev]
+debug = false
+strip = "debuginfo"
