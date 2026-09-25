@@ -2,11 +2,13 @@
 
 * Respond in English unless the code or existing comments are in another language.
 * Assume gcc on linux, cmake, Cargo.
-* Cross platform Mingw
+* Cross platform Mingw (UCRT)
 * Framework is Gtk3 and Gtk4
 * We are make a wrapper for Servo Web View written in Rust for Gtk3 and Gtk4.
 * Make small, safe changes rather than large refactorings.
 * Preserve the existing architecture, naming conventions, and formatting.
+* This must work on Windows, macOS and Linux
+* This must work on computers with no GPU and GL context available. So only CPU
 
 ## Rust
 * Use the existing Rust code as a reference.

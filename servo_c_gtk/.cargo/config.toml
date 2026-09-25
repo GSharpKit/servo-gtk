@@ -2,3 +2,14 @@
 rustflags = [
     "-Ztls-model=global-dynamic"
 ]
+# Windows note: the MSVC runtime CANNOT be linked statically here, so the
+# target machine must have the Microsoft Visual C++ 2015-2022 x64
+# redistributable, and it must be at least as new as the toolset this was
+# built with (cargo-xwin's SDK). An older one faults inside MSVCP140.dll in
+# the std::locale / iostreams machinery while Servo starts SpiderMonkey.
+#
+# Tried and rejected 2026-09-25: `-C target-feature=+crt-static` makes `cc`
+# switch the C++ crates to /MT, but `mozjs_sys` hardcodes /MD, and the link
+# dies on `/failifmismatch: mismatch detected for 'RuntimeLibrary'`
+# (libmozangle MT_StaticRelease vs libmozjs_sys MD_DynamicRelease). Making
+# this work means patching the SpiderMonkey build, not this file.

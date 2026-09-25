@@ -505,78 +505,13 @@ servo_gtk_web_view_draw(GtkWidget *widget, cairo_t *cr)
     return FALSE;
 }
 
-#ifdef G_OS_WIN32
-/*
- * Servo's rendering context resolves its GL entry points as soon as it is
- * built. On Windows the loader is wglGetProcAddress(), which only returns
- * valid pointers while some GL context is current on the calling thread, and
- * surfman restores the previously current context before Servo gets that far
- * (surfman's CurrentContextGuard) -- so a context has to be current *already*.
- * GTK4 provides one incidentally, because its GSK renderer leaves a WGL
- * context current; GTK3 renders through Cairo/GDI and never makes one current,
- * so servo_webview_new() would abort the process while reading GL_VERSION.
- *
- * Make a GDK GL context current on the widget's window first. It is attached to
- * the widget so it stays alive for as long as Servo might need its driver.
- * Returns FALSE if none could be made current, in which case Servo must not be
- * created at all: constructing it would abort rather than fail.
- */
-static gboolean
-servo_gtk_web_view_ensure_gl_context(ServoGtkWebView *self)
-{
-    GdkWindow    *window = gtk_widget_get_window(GTK_WIDGET(self));
-    GdkGLContext *context = g_object_get_data(G_OBJECT(self), "servo-gl-context");
-    GError       *error = NULL;
-
-    if (context != NULL) {
-        gdk_gl_context_make_current(context);
-        return TRUE;
-    }
-
-    if (window == NULL) {
-        return FALSE;
-    }
-
-    context = gdk_window_create_gl_context(window, &error);
-    if (context == NULL) {
-        g_warning("Servo: cannot create a GDK GL context: %s", error->message);
-        g_clear_error(&error);
-        return FALSE;
-    }
-
-    if (!gdk_gl_context_realize(context, &error)) {
-        g_warning("Servo: cannot realize the GDK GL context: %s", error->message);
-        g_clear_error(&error);
-        g_object_unref(context);
-        return FALSE;
-    }
-
-    gdk_gl_context_make_current(context);
-    g_object_set_data_full(G_OBJECT(self), "servo-gl-context", context, g_object_unref);
-
-    return TRUE;
-}
-#else
-/*
- * Elsewhere the loader is eglGetProcAddress()/glXGetProcAddressARB(), which
- * resolve symbols without a current context, so there is nothing to arrange.
- */
-static gboolean
-servo_gtk_web_view_ensure_gl_context(ServoGtkWebView *self)
-{
-    (void) self;
-
-    return TRUE;
-}
-#endif
-
 /*
  * Create the Servo instance, from the main loop rather than from inside
  * size_allocate(). GTK3 allocates synchronously from gtk_widget_show(), while
- * the widget is still being realized, which is too early to have a GdkWindow to
- * hang a GL context off. Running at idle instead means Servo is built against a
- * realized window and a settled allocation -- the same point in the frame that
- * GTK4's frame-clock-driven "resize" signal already fires at.
+ * the widget is still being realized, so the allocation seen there has not
+ * settled yet. Running at idle instead means Servo is built against a realized
+ * window and a settled allocation -- the same point in the frame that GTK4's
+ * frame-clock-driven "resize" signal already fires at.
  */
 static gboolean
 servo_gtk_web_view_create_idle(gpointer user_data)
@@ -587,11 +522,6 @@ servo_gtk_web_view_create_idle(gpointer user_data)
     self->create_idle_id = 0;
 
     if (self->servo != NULL) {
-        return G_SOURCE_REMOVE;
-    }
-
-    if (!servo_gtk_web_view_ensure_gl_context(self)) {
-        g_warning("Servo: no GL context could be made current; the web view stays blank.");
         return G_SOURCE_REMOVE;
     }
 
@@ -614,6 +544,13 @@ servo_gtk_web_view_create_idle(gpointer user_data)
             self->servo, servo_gtk_web_view_on_url_changed, self);
         /* Scroll geometry can only be read once there is a page to ask. */
         servo_gtk_web_view_update_scroll_polling(self);
+    } else {
+        /*
+         * The engine could not build a rendering context at all. Rasterization
+         * is pure CPU and needs no GL, driver or GPU, so this is not about
+         * graphics hardware; the reason is printed by the Rust side.
+         */
+        g_warning("Servo: the engine could not be created; the web view stays blank.");
     }
 
     return G_SOURCE_REMOVE;

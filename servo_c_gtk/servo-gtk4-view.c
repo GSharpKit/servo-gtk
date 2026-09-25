@@ -542,6 +542,19 @@ servo_gtk_web_view_on_resize(GtkDrawingArea *area,
                 self->servo, servo_gtk_web_view_on_url_changed, self);
             /* Scroll geometry can only be read once there is a page to ask. */
             servo_gtk_web_view_update_scroll_polling(self);
+        } else {
+            /*
+             * The engine could not build a rendering context at all. The
+             * reason is printed by the Rust side, and it is not about graphics
+             * hardware: rasterization is pure CPU and needs no GL, driver or
+             * GPU.
+             *
+             * Nothing here needs a GL context of its own either -- Servo
+             * renders into its own CPU framebuffer and this widget blits the
+             * resulting frames with Cairo -- so GSK falling back to its cairo
+             * renderer on a GL-less machine costs the web view nothing.
+             */
+            g_warning("Servo: the engine could not be created; the web view stays blank.");
         }
     } else {
         servo_webview_resize(self->servo, w, h);

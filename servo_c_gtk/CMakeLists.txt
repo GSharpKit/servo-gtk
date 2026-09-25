@@ -96,8 +96,14 @@ endif()
 
 # Re-run Cargo when any Rust source or the manifest changes. Cargo's own
 # incremental build makes a no-op invocation cheap.
+#
+# third_party/ holds the crates patched in via [patch.crates-io] in Cargo.toml.
+# They must be listed too: editing one changes the cdylib, but Cargo is invoked
+# through a custom command, so without a declared dependency Ninja reports
+# "no work to do" and silently keeps the stale library.
 file(GLOB_RECURSE SERVO_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/servo/*.rs
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/*.rs
 )
 
 set(CARGO_DEPENDS
@@ -105,6 +111,7 @@ set(CARGO_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
         ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock
         ${CMAKE_CURRENT_SOURCE_DIR}/build.rs
+        ${CMAKE_CURRENT_SOURCE_DIR}/.cargo/config.toml
 )
 
 if(WIN32)
@@ -451,6 +458,21 @@ function(add_servo_gtk_library)
             PRIVATE
             ${lib}
             ${gtk_libraries})
+
+    # Windows hands the main thread a 1-2 MB stack; Linux gives it 8 MB.
+    # servo_webview_new() builds the whole engine -- SpiderMonkey, the
+    # constellation, the font backend -- on whichever thread calls it, and
+    # that is deep enough to matter. A stack overflow there is an SEH
+    # exception, so it unwinds nothing and prints nothing: the app simply
+    # disappears, which is indistinguishable from any other silent crash.
+    #
+    # Reserve (not commit) 16 MB, so it costs address space rather than RAM.
+    # Embedders that are not these demos have to do the same thing in their
+    # own link; the crash filter in servo-diagnostics.rs names this explicitly
+    # when it sees STACK_OVERFLOW.
+    if(WIN32)
+        target_link_options(${lib}-demo PRIVATE -Wl,--stack,16777216)
+    endif()
 
     # Installed to <prefix>/bin, it finds servogtkN + libservoshell in the install
     # libdir via a relative rpath.

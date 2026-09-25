@@ -16,6 +16,23 @@
 // alias CMake installs next to the real file, so dependents keep resolving the
 // ABI they were linked against. Bump both when SERVO_SOVERSION changes.
 fn main() {
+    // Stamp the build time into the library so a running copy can say how old
+    // it is. The whole point is telling "my fix did not work" apart from "I am
+    // running yesterday's DLL", which is otherwise invisible on Windows, where
+    // a stale libservoshell.dll next to the .exe silently wins over a fresh
+    // one. Printed once at startup when SERVO_LOG_FILE or RUST_LOG is set.
+    //
+    // No `rerun-if-changed` is emitted anywhere in this script, so Cargo falls
+    // back to re-running it whenever anything in the package changes -- which
+    // is exactly when the stamp should move. A no-op build keeps the old
+    // stamp, so an unchanged number across two builds is itself the answer:
+    // nothing was rebuilt.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    println!("cargo::rustc-env=SERVO_BUILD_STAMP={stamp}");
+
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     match target_os.as_str() {
         "macos" | "ios" => {

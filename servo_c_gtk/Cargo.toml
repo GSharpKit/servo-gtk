@@ -20,8 +20,63 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 # Used to render the serde-serializable `JSValue` returned by evaluate_javascript
 # into a plain JSON string for the C callback. Pinned to whatever `servo` resolves.
 serde_json = "1.0"
+# Opt-in engine diagnostics (RUST_LOG). Servo already builds env_logger -- it is
+# a direct dependency of the `servo` crate -- so naming it here adds no crate to
+# the graph and nothing to the build; it only makes the API reachable from our
+# own code, which has to install the logger before the rendering context is
+# built. See `ensure_initialized`.
+env_logger = "0.11"
+# Same reasoning as env_logger: already in the graph via `servo`, named here
+# only so the rendering context can report why a frame did not happen.
+log = "0.4"
+# Only for signal(SIGABRT): abort() bypasses both the Rust panic hook and
+# Windows' unhandled-exception filter, so it is the one fatal path neither
+# existing handler in servo-diagnostics.rs can see. swgl's assert()s and
+# mozalloc_abort both end there.
+libc = "0.2"
 content-security-policy = "=0.8.2"
 #primeorder = "=0.14.0-rc.14"
+
+# ==========================================================================
+# CPU-only rendering
+# ==========================================================================
+# Servo's compositor is WebRender, and WebRender only speaks OpenGL -- there is
+# no non-GL path in the embedding API. So the way to run on a machine with no
+# GL at all is not to stop using GL, but to *bring our own*, in software,
+# compiled into this cdylib.
+#
+# `swgl` is WebRender's own rasterizer (what Firefox ships as "Software
+# WebRender"). It is C++ built by its build.rs and linked straight in: it
+# resolves no libEGL, libGLESv2, opengl32, D3D or Mesa, needs no driver, no GPU
+# and no display server. Servo's own `SoftwareRenderingContext` does NOT give
+# us that -- it asks surfman for a software *adapter*, which is Mesa llvmpipe
+# on Unix and ANGLE over D3D11 WARP on Windows, both of which have to be
+# installed. See `servo/servo-swgl-context.rs`.
+#
+# WebRender picks the software paths up by itself: it compares glGetString
+# (GL_RENDERER) against "Software WebRender", which is exactly what swgl
+# reports, and then turns off optimized shaders and switches to native
+# clip-masking and anti-aliasing. WebRender's `sw_compositor` feature is a
+# different thing (an OS-surface compositor) and is deliberately NOT enabled.
+#
+# Cost: WebGL and WebGPU canvases no longer render, because there is no GPU
+# context to hand them. Everything else -- HTML, CSS, text, images, video --
+# rasterizes on the CPU.
+swgl = "0.70"
+# Only to name the types in the `RenderingContext` impl. All three MUST stay at
+# whatever the servo graph already resolves, or Cargo builds a second, distinct
+# copy and the trait no longer lines up:
+#   * gleam -- `RenderingContext::gleam_gl_api` returns `Rc<dyn gleam::gl::Gl>`,
+#     and `swgl::Context` implements that trait.
+#   * glow  -- only for the `glow_gl_api` signature; nothing in Servo calls it.
+#   * surfman -- `Connection` and `Error` appear in the trait and `servo` does
+#     not re-export them. Featureless on purpose: adding features here (this is
+#     where `sm-angle-default` used to live) changes the backend for every
+#     surfman user in the graph. Check with `cargo tree -i surfman` -- it must
+#     report exactly one version.
+gleam = "0.15"
+glow = "0.17"
+surfman = "0.13"
 
 # jemalloc must NOT use the initial-exec TLS model, or the baked engine overflows
 # the static TLS block when the .so is dlopen'd after startup (e.g. .NET P/Invoke /
@@ -31,23 +86,19 @@ content-security-policy = "=0.8.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemalloc-sys = { version = "0.6.1", features = ["disable_initial_exec_tls"] }
 
-# On Windows, native WGL/OpenGL is unreliable, so drive Servo through ANGLE
-# (OpenGL ES over Direct3D 11 / EGL). We flip ONLY surfman's default connection to
-# ANGLE via `sm-angle-default`; feature unification makes every surfman user in
-# the graph (paint_api, webgl, …) default to the EGL/ANGLE backend.
-#
-# We deliberately do NOT enable Servo's `no-wgl` feature: besides the surfman
-# switch, it turns on `mozangle/build_dlls`, which compiles ANGLE from source by
-# shelling out to clang-cl — and that build breaks under cargo-xwin cross
-# compilation ("cannot specify '/Fo…out\' when compiling multiple source files").
-# `sm-angle-default` alone does NOT pull surfman's optional mozangle dep (only
-# `sm-angle-builtin` does), so mozangle stays translator-only and builds cleanly.
-#
-# Consequence: surfman loads `libEGL.dll` / `libGLESv2.dll` at runtime via
-# LoadLibrary. Ship prebuilt ANGLE DLLs next to libservoshell.dll.
+# Crash reporting only. A Windows GUI process that dies from an access
+# violation or a stack overflow unwinds nothing, runs no panic hook and prints
+# nothing -- the app just disappears. `SetUnhandledExceptionFilter` is the only
+# way to find out what happened; see `servo/servo-diagnostics.rs`.
 [target.'cfg(windows)'.dependencies]
-surfman = { version = "0.12.3", features = ["sm-angle-default"] }
-# windows-sys = { version = "0.60.2", features = ["Win32_Graphics_OpenGL"] }
+windows-sys = { version = "0.60.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    # EXCEPTION_POINTERS lives behind Win32_System_Kernel, not the Debug
+    # feature that names the function taking it.
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+] }
 
 [build-dependencies]
 glib-build-tools = "0.22"
@@ -93,3 +144,13 @@ incremental = false
 [profile.dev]
 debug = false
 strip = "debuginfo"
+
+# ==========================================================================
+# Local patch: servo-paint
+# ==========================================================================
+# EXPERIMENT -- see third_party/servo-paint/painter.rs. One line changed
+# (`clear_caches_with_quads: false`) so WebRender clears picture-cache tiles
+# with a scissored glClear instead of a quad drawn with GL_ALWAYS, which the
+# swgl CPU rasterizer does not implement.
+[patch.crates-io]
+servo-paint = { path = "third_party/servo-paint" }

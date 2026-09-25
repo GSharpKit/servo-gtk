@@ -21,6 +21,7 @@
 //! 5. `servo_webview_free()` — destroy the handle.
 
 use std::cell::RefCell;
+use std::env;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::rc::Rc;
@@ -32,8 +33,7 @@ use servo::{
     JavaScriptEvaluationError,
     Key, KeyState, KeyboardEvent, Location, Modifiers, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseMoveEvent, NamedKey, PrefValue, Preferences, RenderingContext, Scroll,
-    Servo, ServoBuilder, SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate,
-    WebViewPoint, WebViewVector,
+    Servo, ServoBuilder, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
 };
 use url::Url;
 
@@ -42,6 +42,19 @@ use url::Url;
 /// shares no state with the webview and may be driven from any thread.
 #[path = "servo-pdf-server.rs"]
 mod pdf_server;
+
+/// Panic reporting and opt-in file logging. Exists because on Windows a
+/// failing embedder produces no visible output at all -- see the module docs.
+#[path = "servo-diagnostics.rs"]
+mod diagnostics;
+
+/// CPU-only rendering context. Servo's own `SoftwareRenderingContext` still
+/// needs an installed GL implementation (Mesa llvmpipe, or ANGLE over D3D11
+/// WARP); this one compiles the rasterizer in. See the module docs.
+#[path = "servo-swgl-context.rs"]
+mod swgl_context;
+
+use swgl_context::SwglRenderingContext;
 
 /// Called once per rendered frame with a tightly-packed RGBA8 buffer.
 ///
@@ -210,7 +223,7 @@ pub struct ServoWebViewHandle {
     delegate: Rc<EmbedderDelegate>,
     // Kept alive for as long as the webview lives; the delegate also holds a
     // type-erased clone of the same context.
-    _rendering_context: Rc<SoftwareRenderingContext>,
+    _rendering_context: Rc<SwglRenderingContext>,
 }
 
 static INIT: Once = Once::new();
@@ -225,6 +238,60 @@ static INIT: Once = Once::new();
 /// API no longer exists. There is no supported way to override it at runtime.
 fn ensure_initialized() {
     INIT.call_once(|| {
+        // Install a logger first, before the rendering context is built.
+        //
+        // Everything that knows *why* a frame never arrives reports through the
+        // `log` crate: the rendering context, WebRender's renderer and shader
+        // setup, the compositor. With no logger installed every one of those
+        // messages is discarded, which is what makes a broken embedding look
+        // like a slow one. It has to happen here rather than via
+        // `Servo::setup_logging()`, because the rendering context -- the thing
+        // most likely to fail -- is built before there is a `Servo` to ask.
+        //
+        // Opt-in via RUST_LOG, and `try_init` rather than `init`: this is a
+        // library inside someone else's process, so it must neither log
+        // unbidden nor panic over a logger the host installed first.
+        //
+        // `RUST_LOG=warn` shows why a rendering context could not be built;
+        // `RUST_LOG=warn,webrender=debug` adds the renderer's own view -- it
+        // should report `Software WebRender` as the GL renderer.
+        //
+        // SERVO_LOG_FILE redirects all of it to a file, and is the only thing
+        // that works on Windows. There, stderr goes nowhere useful: a GUI
+        // subsystem process has no console at all, and even a console one
+        // loses its output the moment the app is started from Explorer rather
+        // than cmd. That is what turns "the engine told you exactly what went
+        // wrong" into "it closed and gave no info". Setting SERVO_LOG_FILE is
+        // also enough on its own -- no RUST_LOG needed -- defaulting to
+        // `warn`, because someone who named a log file wants its contents.
+        let log_file = env::var_os("SERVO_LOG_FILE");
+        if log_file.is_some() || env::var_os("RUST_LOG").is_some() {
+            let env = env_logger::Env::default().default_filter_or("warn");
+            let mut builder = env_logger::Builder::from_env(env);
+            if let Some(path) = &log_file
+                && let Ok(file) = diagnostics::open_log(path)
+            {
+                builder.target(env_logger::Target::Pipe(Box::new(file)));
+            }
+            let _ = builder.try_init();
+        }
+
+        // Say what this build actually is, before anything can go wrong with
+        // it. On Windows a stale libservoshell.dll beside the .exe silently
+        // wins over a freshly built one, so "the fix did not work" and "this
+        // is not the fixed binary" look identical. The stamp settles it.
+        log::warn!(
+            "libservoshell {} (built {}s since epoch), CPU-only swgl rendering",
+            env!("CARGO_PKG_VERSION"),
+            env!("SERVO_BUILD_STAMP"),
+        );
+
+        // A panic must never be the last thing that happens silently. Servo
+        // runs threads of its own, and a panic on any of them -- or one
+        // crossing our `extern "C"` boundary -- aborts the host process; on
+        // Windows that is an app that simply vanishes. Record it first.
+        diagnostics::install_panic_hook();
+
         // Servo performs HTTPS itself and expects a default rustls crypto
         // provider to be installed by the embedder. Fail closed is not an
         // option here (it would abort the process), but a duplicate install is
@@ -368,9 +435,17 @@ pub unsafe extern "C" fn servo_webview_new(
     ensure_initialized();
 
     let size = dpi::PhysicalSize::new(width.max(1), height.max(1));
-    let rendering_context = match SoftwareRenderingContext::new(size) {
+    // This cannot fail for want of a GPU, a driver, a GL implementation or
+    // even a display server -- rasterization is all CPU code linked into this
+    // library. Only a degenerate size gets here.
+    diagnostics::trace(&format!("servo_webview_new: entered, {width}x{height}"));
+
+    let rendering_context = match SwglRenderingContext::new(size) {
         Ok(context) => Rc::new(context),
-        Err(_) => return ptr::null_mut(),
+        Err(error) => {
+            eprintln!("servo_webview_new: no rendering context ({error:?}).");
+            return ptr::null_mut();
+        }
     };
 
     let initial_url = if initial_uri.is_null() {
@@ -382,9 +457,11 @@ pub unsafe extern "C" fn servo_webview_new(
             .and_then(|s| Url::parse(s).ok())
     };
 
+    diagnostics::trace("rendering context ready, building Servo");
     let servo = ServoBuilder::default()
         .preferences(experimental_preferences())
         .build();
+    diagnostics::trace("Servo built, building WebView");
 
     let delegate = Rc::new(EmbedderDelegate::new(rendering_context.clone()));
     let mut builder = WebViewBuilder::new(&servo, rendering_context.clone())
@@ -393,8 +470,10 @@ pub unsafe extern "C" fn servo_webview_new(
         builder = builder.url(url);
     }
     let webview = builder.build();
+    diagnostics::trace("WebView built");
     webview.focus();
     webview.show();
+    diagnostics::trace("servo_webview_new: complete");
 
     let handle = Box::new(ServoWebViewHandle {
         servo,

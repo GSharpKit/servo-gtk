@@ -1,3 +1,22 @@
+/*
+ * GTK4 web view widget backed by Servo.
+ *
+ * Rendering is CPU-only: Servo rasterizes into its own framebuffer with the
+ * swgl software rasterizer and this widget blits the finished RGBA frames
+ * with Cairo. No GL implementation, driver or GPU is required by the widget
+ * or by the engine.
+ *
+ * GTK4 itself is a different matter. GSK's default renderer wants OpenGL,
+ * which on Windows it reaches through libepoxy loading ANGLE's libEGL.dll and
+ * libGLESv2.dll. On a machine with no GL those are missing and GTK4 may fail
+ * before any window appears. If you target GL-less machines, select the Cairo
+ * renderer before gtk_init():
+ *
+ *     g_setenv("GSK_RENDERER", "cairo", FALSE);
+ *
+ * (demo/servo-gtk4-demo.c does exactly this.) It costs the web view nothing,
+ * because the frames are Cairo blits either way.
+ */
 #ifndef SERVO_GTK4_VIEW_H
 #define SERVO_GTK4_VIEW_H
 
