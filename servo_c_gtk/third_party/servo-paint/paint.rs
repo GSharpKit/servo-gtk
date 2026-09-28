@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::create_dir_all;
 use std::rc::Rc;
+#[cfg(feature = "webgl")]
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,8 +20,9 @@ use embedder_traits::{
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
-use ipc_channel::ipc::{self};
-use log::{debug, warn};
+use log::debug;
+#[cfg(feature = "webgl")]
+use log::warn;
 use paint_api::rendering_context::RenderingContext;
 use paint_api::{
     PaintMessage, PaintProxy, PainterSurfmanDetails, PainterSurfmanDetailsMap,
@@ -31,16 +33,21 @@ use profile_traits::mem::{
 };
 use profile_traits::path;
 use profile_traits::time::{self as profile_time};
-use servo_base::generic_channel::{GenericSender, RoutedReceiver};
+use servo_base::generic_channel::{self, GenericSender, RoutedReceiver};
 use servo_base::id::{PainterId, PipelineId, WebViewId};
+#[cfg(feature = "webgl")]
 use servo_canvas_traits::webgl::{WebGLContextId, WebGLThreads};
 use servo_config::pref;
 use servo_constellation_traits::EmbedderToConstellationMessage;
 use servo_geometry::DeviceIndependentPixel;
 use style_traits::CSSPixel;
+#[cfg(feature = "webgl")]
 use surfman::Device;
+#[cfg(feature = "webgl")]
 use surfman::chains::SwapChains;
+#[cfg(feature = "webgl")]
 use webgl::WebGLComm;
+#[cfg(feature = "webgl")]
 use webgl::webgl_thread::WebGLContextBusyMap;
 #[cfg(feature = "webgpu")]
 use webgpu::canvas_context::WebGpuExternalImageMap;
@@ -60,6 +67,36 @@ pub enum WebRenderDebugOption {
     Profiler,
     TextureCacheDebug,
     RenderTargetDebug,
+}
+
+/// Keeps track of all webgl related elements
+#[cfg(feature = "webgl")]
+pub struct WebGLPaint {
+    /// A [`HashMap`] of `WebGLContextId` to a usage count. This count indicates when
+    /// WebRender is still rendering the context. This is used to ensure properly clean
+    /// up of all Surfman `Surface`s.
+    pub(crate) busy_webgl_contexts_map: WebGLContextBusyMap,
+
+    /// The [`WebGLThreads`] for this renderer.
+    webgl_threads: WebGLThreads,
+
+    /// A [`JoinHandle`] for joining the WebGL thread once the exit message is sent.
+    webgl_join_handle: Cell<Option<JoinHandle<()>>>,
+
+    /// The shared [`SwapChains`] used by [`WebGLThreads`] for this renderer.
+    pub(crate) swap_chains: SwapChains<WebGLContextId, Device>,
+}
+
+#[cfg(feature = "webgl")]
+impl WebGLPaint {
+    fn shutdown(&self) {
+        self.webgl_threads.exit();
+        if let Some(webgl_join_handle) = self.webgl_join_handle.take() &&
+            webgl_join_handle.join().is_err()
+        {
+            warn!("Could not join WebGLThread.");
+        }
+    }
 }
 
 /// [`Paint`] is Servo's rendering subsystem. It has a few responsibilities:
@@ -113,19 +150,9 @@ pub struct Paint {
     /// are specific to a particular [`Painter`].
     pub(crate) painter_surfman_details_map: PainterSurfmanDetailsMap,
 
-    /// A [`HashMap`] of `WebGLContextId` to a usage count. This count indicates when
-    /// WebRender is still rendering the context. This is used to ensure properly clean
-    /// up of all Surfman `Surface`s.
-    pub(crate) busy_webgl_contexts_map: WebGLContextBusyMap,
-
-    /// The [`WebGLThreads`] for this renderer.
-    webgl_threads: WebGLThreads,
-
-    /// A [`JoinHandle`] for joining the WebGL thread once the exit message is sent.
-    webgl_join_handle: Cell<Option<JoinHandle<()>>>,
-
-    /// The shared [`SwapChains`] used by [`WebGLThreads`] for this renderer.
-    pub(crate) swap_chains: SwapChains<WebGLContextId, Device>,
+    #[cfg(feature = "webgl")]
+    /// Keeps track of all webgl related elements.
+    pub(crate) webgl_paint: WebGLPaint,
 
     /// The channel on which messages can be sent to the time profiler.
     time_profiler_chan: profile_time::ProfilerChan,
@@ -174,6 +201,7 @@ impl Paint {
 
         let webrender_external_image_id_manager = WebRenderExternalImageIdManager::default();
         let painter_surfman_details_map = PainterSurfmanDetailsMap::default();
+        #[cfg(feature = "webgl")]
         let WebGLComm {
             webgl_threads,
             swap_chains,
@@ -187,7 +215,7 @@ impl Paint {
             painter_surfman_details_map.clone(),
         );
 
-        // Create the WebXR main thread
+        // Create the WebXR main thread.
         #[cfg(feature = "webxr")]
         let webxr_main_thread = webxr::MainThreadRegistry::new(
             state.event_loop_waker.clone(),
@@ -195,6 +223,13 @@ impl Paint {
         )
         .expect("Failed to create WebXR device registry");
 
+        #[cfg(feature = "webgl")]
+        let webgl_paint = WebGLPaint {
+            busy_webgl_contexts_map: busy_webgl_context_map,
+            webgl_threads,
+            webgl_join_handle: Cell::new(Some(webgl_join_handle)),
+            swap_chains,
+        };
         Rc::new(RefCell::new(Paint {
             painters: Default::default(),
             paint_proxy: state.paint_proxy,
@@ -203,13 +238,11 @@ impl Paint {
             paint_receiver: state.receiver,
             embedder_to_constellation_sender: state.embedder_to_constellation_sender.clone(),
             webrender_external_image_id_manager,
-            webgl_threads,
-            webgl_join_handle: Cell::new(Some(webgl_join_handle)),
-            swap_chains,
+            #[cfg(feature = "webgl")]
+            webgl_paint,
             time_profiler_chan: state.time_profiler_chan,
             _mem_profiler_registration: registration,
             painter_surfman_details_map,
-            busy_webgl_contexts_map: busy_webgl_context_map,
             #[cfg(feature = "webxr")]
             webxr_main_thread: RefCell::new(webxr_main_thread),
             #[cfg(feature = "webgpu")]
@@ -249,8 +282,8 @@ impl Paint {
         // and behind it the whole vendor GL stack, gbm, drm, gallium, LLVM --
         // to be loadable on a machine that is meant to need no GL at all.
         //
-        // Both lookups in the WebGL thread already handle a missing entry:
-        // `servo-webgl-0.5.0/webgl_thread.rs:432` and `:543` return
+        // The lookup in the WebGL thread already handles a missing entry:
+        // `servo-webgl-0.6.0/webgl_thread.rs:433` returns
         // `Err("No PainterSurfmanDetails found ...")`. So skipping the insert
         // degrades exactly WebGL and nothing else.
         if let Some(connection) = rendering_context.connection() {
@@ -277,13 +310,18 @@ impl Paint {
         //
         // LOCAL PATCH (servo-gtk): paired with the conditional insert in
         // `register_rendering_context`. `PainterSurfmanDetailsMap::remove`
-        // asserts the entry existed (`servo-paint-api-0.5.0/lib.rs:565`), so
+        // asserts the entry existed (`servo-paint-api-0.6.0/lib.rs:560`), so
         // a context that provided no connection must not try to remove one.
         if self.painter_surfman_details_map.get(painter_id).is_some() {
             self.painter_surfman_details_map.remove(painter_id);
         }
 
-        if !self.webgl_threads.clear_painter_resources(painter_id) {
+        #[cfg(feature = "webgl")]
+        if !self
+            .webgl_paint
+            .webgl_threads
+            .clear_painter_resources(painter_id)
+        {
             warn!("Could not clear {painter_id:?} resources in WebGLThread");
         }
 
@@ -327,8 +365,9 @@ impl Paint {
         self.painter(painter_id).rendering_context.size2d()
     }
 
+    #[cfg(feature = "webgl")]
     pub fn webgl_threads(&self) -> WebGLThreads {
-        self.webgl_threads.clone()
+        self.webgl_paint.webgl_threads.clone()
     }
 
     pub fn webrender_external_image_id_manager(&self) -> WebRenderExternalImageIdManager {
@@ -368,15 +407,11 @@ impl Paint {
         // another thread from finishing (i.e. SetFrameTree).
         while self.paint_receiver.try_recv().is_ok() {}
 
-        self.webgl_threads.exit();
-        if let Some(webgl_join_handle) = self.webgl_join_handle.take() &&
-            webgl_join_handle.join().is_err()
-        {
-            warn!("Could not join WebGLThread.");
-        }
+        #[cfg(feature = "webgl")]
+        self.webgl_paint.shutdown();
 
         // Tell the profiler, memory profiler, and scrolling timer to shut down.
-        if let Ok((sender, receiver)) = ipc::channel() {
+        if let Some((sender, receiver)) = generic_channel::channel() {
             self.time_profiler_chan
                 .send(profile_time::ProfilerMsg::Exit(sender));
             let _ = receiver.recv();
@@ -570,11 +605,6 @@ impl Paint {
             PaintMessage::SendLCPCandidate(lcp_candidate, webview_id, pipeline_id, epoch) => {
                 if let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) {
                     painter.append_lcp_candidate(lcp_candidate, webview_id, pipeline_id, epoch);
-                }
-            },
-            PaintMessage::EnableLCPCalculation(webview_id) => {
-                if let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) {
-                    painter.enable_lcp_calculation(&webview_id);
                 }
             },
         }

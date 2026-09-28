@@ -54,7 +54,7 @@ static guint signals[N_SIGNALS] = { 0 };
  * Scroll state, kept in the (previously unused) private pointer so the public
  * struct keeps its layout.
  *
- * Servo 0.5.0 has no API for the scroll offset or the scrollable extent: it
+ * Servo has no API for the scroll offset or the scrollable extent: it
  * only accepts relative scroll events. The numbers a scrollbar needs therefore
  * come from the page itself, by evaluating a small script on a timer, and a
  * drag is applied by assigning scrollLeft/scrollTop the same way. That also

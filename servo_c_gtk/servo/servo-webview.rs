@@ -361,7 +361,6 @@ unsafe fn as_handle<'a>(ptr: *mut ServoWebViewHandle) -> Option<&'a ServoWebView
 /// that disappears in a future version is skipped rather than panicking.
 const EXPERIMENTAL_WEB_PLATFORM_FEATURES: &[&str] = &[
     "dom_webgpu_enabled",
-    "dom_abort_controller_enabled",
     "dom_adoptedstylesheet_enabled",
     "dom_async_clipboard_enabled",
     "dom_canvas_capture_enabled",
@@ -375,7 +374,6 @@ const EXPERIMENTAL_WEB_PLATFORM_FEATURES: &[&str] = &[
     "dom_wakelock_enabled",
     "dom_indexeddb_enabled",
     "dom_intersection_observer_enabled",
-    "dom_mutation_observer_enabled",
     "dom_navigator_protocol_handlers_enabled",
     "dom_notification_enabled",
     "dom_offscreen_canvas_enabled",
@@ -388,7 +386,6 @@ const EXPERIMENTAL_WEB_PLATFORM_FEATURES: &[&str] = &[
     "dom_webgl2_enabled",
     "dom_webrtc_enabled",
     "dom_webrtc_transceiver_enabled",
-    "dom_webvtt_enabled",
     "dom_webxr_layers_enabled",
     "dom_visual_viewport_enabled",
     "largest_contentful_paint_enabled",
@@ -677,10 +674,13 @@ pub unsafe extern "C" fn servo_webview_pointer_button(
     let Some(handle) = (unsafe { as_handle(webview) }) else {
         return;
     };
+    // GTK numbers buttons 1/2/3; Servo 0.6.0 renamed the variants to the
+    // Pointer Events names (`Left`/`Middle`/`Right` became
+    // `Primary`/`Auxiliary`/`Secondary`). Same buttons, spec wording.
     let mouse_button = match button {
-        2 => MouseButton::Middle,
-        3 => MouseButton::Right,
-        _ => MouseButton::Left,
+        2 => MouseButton::Auxiliary,
+        3 => MouseButton::Secondary,
+        _ => MouseButton::Primary,
     };
     let action = if pressed {
         MouseButtonAction::Down

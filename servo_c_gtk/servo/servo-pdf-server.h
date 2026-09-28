@@ -203,7 +203,7 @@ void servo_pdf_server_set_viewer_toolbar_visible(ServoPdfServerHandle *server,
  * <input type="range"> on every restyle. PDF.js's viewer has five of them,
  * which is enough to saturate the script thread — the viewer chrome paints but
  * pages take minutes to appear, or never do. Measured on a debug build of
- * Servo 0.5.0: 3 frames / 45s and 60s+ script latency with the stock CSP,
+ * 3 frames / 45s and 60s+ script latency with the stock CSP,
  * versus 629 frames / 45s and instant script latency with this enabled.
  *
  * It only widens an existing style-src; no other directive is touched, and the

@@ -13,9 +13,9 @@ makes Servo impossible to drive with a pure-CPU (swgl) rasterizer.
 
 | | |
 |---|---|
-| servo | 0.5.0 (crates.io), embedded in-process via a C ABI wrapper |
-| mozjs_sys | 140.14.0-0 (SpiderMonkey 140) |
-| stylo | 0.20.0 |
+| servo | 0.6.0 (crates.io), embedded in-process via a C ABI wrapper |
+| mozjs_sys | 153.3.0-0 (SpiderMonkey 153) |
+| stylo | 0.21.0 |
 | rendering | `SoftwareRenderingContext`, 1200x900, driven by `spin_event_loop()` |
 | rustc | 1.99.0-nightly (0e29c21d9 2026-07-21) |
 | OS | Fedora Linux 44, kernel 7.1.12-200.fc44.x86_64 |
@@ -187,7 +187,7 @@ Marked as such in `stylo-0.20.0/properties/longhands.toml`:
 servo_pref = "layout.unimplemented"
 ```
 
-and `layout_unimplemented` defaults to `false` in `servo-config-0.5.0`.
+and `layout_unimplemented` defaults to `false` in `servo-config-0.6.0`.
 
 **Observed**
 
@@ -272,7 +272,7 @@ With `NDEBUG` defined (how Gecko ships swgl) there is no abort, but nothing
 renders: every picture-cache tile stays as it was, because the clear is
 silently dropped.
 
-**Cause** — `servo-paint-0.5.0/painter.rs:226` builds `WebRenderOptions` with
+**Cause** — `servo-paint-0.6.0/painter.rs:233` builds `WebRenderOptions` with
 `..Default::default()`, and WebRender defaults `clear_caches_with_quads` to
 `true` (`webrender-0.70.0/src/renderer/init.rs:267`). That selects the
 quad-based picture-cache clear in
@@ -323,7 +323,7 @@ first time a CSS gradient is painted, which in practice means "on scroll":
 src/gl.cc:1523: void BindAttribLocation(GLuint, GLuint, char*): Assertion `p.impl' failed.
 ```
 
-**Cause** — `servo-paint-0.5.0/painter.rs:241` sets `enable_dithering: true`.
+**Cause** — `servo-paint-0.6.0/painter.rs:249` sets `enable_dithering: true`.
 WebRender then requests the gradient shader with the `DITHERING` feature
 (`webrender-0.70.0/src/renderer/shade.rs:866-875`):
 

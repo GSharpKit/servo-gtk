@@ -1,6 +1,6 @@
 [package]
 name = "libservoshell"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 
 [lib]
@@ -9,8 +9,24 @@ name = "libservoshell"
 path = "servo/servo-webview.rs"
 
 [dependencies]
-#servo = { version = "0.5.0", default-features = true, features = ["gstreamer", "media-gstreamer", "servo-media-gstreamer"] }
-servo = { version = "0.5.0", default-features = true }
+#servo = { version = "0.6.0", default-features = true, features = ["gstreamer", "media-gstreamer", "servo-media-gstreamer"] }
+#
+# `webcrypto` and `brotli-compression-stream` are named explicitly because 0.6.0
+# moved them out of `default`: in 0.5.0 `crypto.subtle` and the brotli format of
+# {De,}CompressionStream were compiled in unconditionally, and dropping them
+# would be a silent web-platform regression for pages we already serve. (HTTP
+# `Content-Encoding: br` is unaffected -- that lives in `net` and stays on.)
+#
+# `webgl` is NOT enabled, and that is the point. 0.6.0 finally made it optional
+# (in 0.5.0 `servo-paint` pulled the WebGL thread in whether you wanted it or
+# not). There is no GPU context to hand a WebGL canvas here -- see the swgl
+# section below -- so the thread only ever existed to fail, and leaving the
+# feature off also drops the surfman device it would have opened. `webgpu` and
+# `webxr` were already off by default in 0.5.0 and stay off.
+servo = { version = "0.6.0", default-features = true, features = [
+    "webcrypto",
+    "brotli-compression-stream",
+] }
 # Versions pinned to whatever `servo` resolves to, so the euclid/dpi/url types
 # unify with Servo's own (a mismatched copy would be a distinct, incompatible type).
 euclid = "0.22"
