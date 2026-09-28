@@ -83,7 +83,8 @@ endif()
 # Windows Rust target so the crate is built for the same ABI as the C library.
 # Cargo then emits into target/<triple>/<profile> instead of target/<profile>.
 # Fedora's MSVC-ABI cross environment uses x86_64-pc-windows-msvc; override
-# CARGO_TARGET_TRIPLE for a different target/ABI.
+# CARGO_TARGET_TRIPLE for a different target/ABI. Read the note on the GNU ABI
+# in the WIN32 block below before reaching for a *-windows-gnu triple.
 if(MINGW)
     set(CARGO_TARGET_TRIPLE "x86_64-pc-windows-msvc"
             CACHE STRING "Rust target triple for the Cargo cdylib build")
@@ -121,18 +122,82 @@ if(WIN32)
     # executable's directory at run time. The MSVC ABI names the import library
     # libservoshell.dll.lib; the GNU ABI uses libservoshell.dll.a.
     set(CARGO_OUTPUT ${SERVO_OUTPUT_DIR}/libservoshell.dll)
+
+    # The cdylib build proper. The MSVC branch wraps this in a shell that sets
+    # up the cross environment first; the GNU branch runs it as it stands.
+    string(JOIN " " CARGO_CMDLINE "\"${RUSTUP_EXECUTABLE}\"" run nightly
+            cargo build ${CARGO_BUILD_FLAGS} ${CARGO_TARGET_FLAGS})
+    set(CARGO_BUILD_COMMAND ${RUSTUP_EXECUTABLE} run nightly cargo build
+            ${CARGO_BUILD_FLAGS} ${CARGO_TARGET_FLAGS})
+
     if(CARGO_TARGET_TRIPLE MATCHES "msvc")
         set(SERVO_IMPLIB ${SERVO_OUTPUT_DIR}/libservoshell.dll.lib)
+
+        # The MSVC ABI needs cargo-xwin's headers, import libraries and
+        # lld-link -- but it cannot come through `cargo xwin build`, which
+        # breaks this crate. See the Makefile's `toolchain` target for how the
+        # SDK is provisioned.
+        #
+        # `cargo xwin build` exports its flags twice: target-scoped in
+        # CARGO_TARGET_<TRIPLE>_RUSTFLAGS, and globally in
+        # CARGO_ENCODED_RUSTFLAGS. Cargo hands the global one down to build
+        # scripts, and five crates new in mozjs_sys 153 -- mozjs_locale_glue,
+        # mozjs_properties_glue, mozjs_normalizer_glue, mozjs_collator_glue and
+        # mozjs_unicode_bidi_ffi -- run cbindgen, which shells out to
+        # `cargo metadata`. That nested Cargo has no --target, so it applies the
+        # MSVC-only flags to the host and rustc refuses them:
+        #
+        #     error: linker flavor `lld-link` is incompatible with the current target
+        #
+        # `cargo xwin env` prints the same environment minus the global
+        # variable. Dropping the target-scoped rustflags as well leaves
+        # .cargo/config.toml the only source of rustflags -- host-safe, and
+        # still carrying the -Ztls-model=global-dynamic this project requires.
+        # Nothing is lost: lld-link still arrives via
+        # CARGO_TARGET_<TRIPLE>_LINKER and the import libraries via LIB, and
+        # Cargo leaks neither of those into build scripts.
+        #
+        # Backticks, not $(...), so Makefile generators cannot eat the
+        # substitution -- and `&&` rather than `;` to separate the steps,
+        # because a semicolon inside this string would split it into separate
+        # arguments when CMake expands the command as a list.
+        string(TOUPPER "${CARGO_TARGET_TRIPLE}" XWIN_TRIPLE_ENV)
+        string(REPLACE "-" "_" XWIN_TRIPLE_ENV "${XWIN_TRIPLE_ENV}")
+        set(XWIN_SCRIPT "eval \"`cargo xwin env --target ${CARGO_TARGET_TRIPLE}`\"")
+        string(APPEND XWIN_SCRIPT " && unset RUSTFLAGS CARGO_TARGET_${XWIN_TRIPLE_ENV}_RUSTFLAGS")
+        string(APPEND XWIN_SCRIPT " && exec ${CARGO_CMDLINE}")
+        set(CARGO_BUILD_COMMAND sh -c "${XWIN_SCRIPT}")
     else()
         set(SERVO_IMPLIB ${SERVO_OUTPUT_DIR}/libservoshell.dll.a)
+        # A GNU-ABI triple links through a MinGW gcc rather than cargo-xwin, so
+        # plain `cargo build` is what has to run.
+        #
+        # Nothing reaches this branch today, and the reason is upstream, not
+        # here: SpiderMonkey cannot be cross-built for *-windows-gnu.
+        # `mozjs_sys`'s makefile.cargo treats every triple containing "windows"
+        # as MSVC and appends `--target=x86_64-pc-windows-msvc` to
+        # SpiderMonkey's own configure, which then stops at "Cannot find a
+        # Visual C++ install for e.g. ATL headers" no matter what CC/CXX point
+        # at. Its MinGW branch is gated on MSYSTEM=MINGW64 -- native MSYS2 only,
+        # unreachable when cross-compiling. The prebuilt fallback is no way out
+        # either: servo/mozjs releases libmozjs-x86_64-pc-windows-msvc.tar.gz
+        # and nothing for gnu or gnullvm. Unblocking this means patching the
+        # SpiderMonkey build, not this file.
+        #
+        # The GTK libraries themselves do build with the MinGW UCRT toolchain
+        # (`make ucrt` -> ucrt64-cmake -> x86_64-w64-mingw32ucrt-gcc); they link
+        # against the MSVC-ABI libservoshell.dll. Mixing the two ABIs is safe
+        # here because servo-webview.h pairs every allocation with its own
+        # deallocator (servo_webview_free, servo_string_free), so no CRT object
+        # ever crosses the DLL boundary.
     endif()
 
     add_custom_command(
             OUTPUT ${CARGO_OUTPUT} ${SERVO_IMPLIB}
-            COMMAND ${RUSTUP_EXECUTABLE} run nightly cargo xwin build ${CARGO_BUILD_FLAGS} ${CARGO_TARGET_FLAGS}
+            COMMAND ${CARGO_BUILD_COMMAND}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             DEPENDS ${CARGO_DEPENDS}
-            COMMENT "Building Rust Servo wrapper (cargo build ${CARGO_BUILD_FLAGS} ${CARGO_TARGET_FLAGS})"
+            COMMENT "Building Rust Servo wrapper (${CARGO_CMDLINE})"
             VERBATIM
     )
 
