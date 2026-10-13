@@ -27,7 +27,33 @@ servo_webview_new(uint32_t width, uint32_t height, const char *initial_uri)
     return NULL;
 }
 
+ServoWebViewHandle *
+servo_webview_new_gl(uint32_t                   width,
+                     uint32_t                   height,
+                     const char                *initial_uri,
+                     ServoGlMakeCurrentCallback make_current,
+                     void                      *user_data)
+{
+    (void) width; (void) height; (void) initial_uri; (void) make_current; (void) user_data;
+    return NULL;
+}
+
 void servo_webview_free(ServoWebViewHandle *webview) { (void) webview; }
+
+void
+servo_webview_set_gl_frame_ready_callback(ServoWebViewHandle       *webview,
+                                          ServoGlFrameReadyCallback callback,
+                                          void                     *user_data)
+{
+    (void) webview; (void) callback; (void) user_data;
+}
+
+bool
+servo_webview_gl_blit(ServoWebViewHandle *webview, uint32_t width, uint32_t height)
+{
+    (void) webview; (void) width; (void) height;
+    return false;
+}
 
 void
 servo_webview_set_frame_ready_callback(ServoWebViewHandle     *webview,
