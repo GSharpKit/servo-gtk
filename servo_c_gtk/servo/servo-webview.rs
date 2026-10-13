@@ -33,7 +33,7 @@ use euclid::Point2D;
 use servo::{
     Code, ConsoleLogLevel, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, JSValue,
     JavaScriptEvaluationError,
-    Key, KeyState, KeyboardEvent, Location, Modifiers, MouseButton, MouseButtonAction,
+    Key, KeyState, KeyboardEvent, LoadStatus, Location, Modifiers, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseMoveEvent, NamedKey, PrefValue, Preferences, RenderingContext, Scroll,
     Servo, ServoBuilder, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
 };
@@ -90,6 +90,26 @@ pub type ServoCursorChangedCallback =
 pub type ServoUrlChangedCallback =
     extern "C" fn(url: *const c_char, user_data: *mut c_void);
 
+/// Called when the page's load status changes. `status` is a
+/// `SERVO_LOAD_STATUS_*` value.
+pub type ServoLoadStatusChangedCallback = extern "C" fn(status: u32, user_data: *mut c_void);
+
+/// `SERVO_LOAD_STATUS_*` values, part of the ABI; keep in sync with
+/// `servo-webview.h`.
+mod servo_load_status {
+    pub const STARTED: u32 = 0;
+    pub const HEAD_PARSED: u32 = 1;
+    pub const COMPLETE: u32 = 2;
+}
+
+fn load_status_to_c(status: LoadStatus) -> u32 {
+    match status {
+        LoadStatus::Started => servo_load_status::STARTED,
+        LoadStatus::HeadParsed => servo_load_status::HEAD_PARSED,
+        LoadStatus::Complete => servo_load_status::COMPLETE,
+    }
+}
+
 /// Called for every `console.*` message logged by the page. `level` is a
 /// `SERVO_CONSOLE_*` value and `message` is a NUL-terminated UTF-8 string valid
 /// only for the duration of the call.
@@ -128,6 +148,11 @@ struct CursorCallback {
     user_data: *mut c_void,
 }
 
+struct LoadStatusCallback {
+    func: ServoLoadStatusChangedCallback,
+    user_data: *mut c_void,
+}
+
 struct UrlCallback {
     func: ServoUrlChangedCallback,
     user_data: *mut c_void,
@@ -144,6 +169,7 @@ struct EmbedderDelegate {
     gl_frame_callback: RefCell<Option<GlFrameCallback>>,
     cursor_callback: RefCell<Option<CursorCallback>>,
     url_callback: RefCell<Option<UrlCallback>>,
+    load_status_callback: RefCell<Option<LoadStatusCallback>>,
     console_callback: RefCell<Option<ConsoleCallback>>,
 }
 
@@ -156,8 +182,22 @@ impl EmbedderDelegate {
             gl_frame_callback: RefCell::new(None),
             cursor_callback: RefCell::new(None),
             url_callback: RefCell::new(None),
+            load_status_callback: RefCell::new(None),
             console_callback: RefCell::new(None),
         }
+    }
+
+    /// Hand a load status to the C callback, if one is registered.
+    fn report_load_status(&self, status: LoadStatus) {
+        let Some(cb) = self
+            .load_status_callback
+            .borrow()
+            .as_ref()
+            .map(|c| (c.func, c.user_data))
+        else {
+            return;
+        };
+        (cb.0)(load_status_to_c(status), cb.1);
     }
 }
 
@@ -245,6 +285,10 @@ impl WebViewDelegate for EmbedderDelegate {
         if let Ok(name) = CString::new(cursor_css_name(cursor)) {
             (cb.0)(name.as_ptr(), cb.1);
         }
+    }
+
+    fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
+        self.report_load_status(status);
     }
 
     fn notify_url_changed(&self, _webview: WebView, url: Url) {
@@ -827,6 +871,42 @@ pub unsafe extern "C" fn servo_webview_set_url_changed_callback(
         callback.map(|func| UrlCallback { func, user_data });
 }
 
+/// Register the load-status callback, invoked whenever the page's load status
+/// changes: `SERVO_LOAD_STATUS_STARTED` when a navigation begins,
+/// `HEAD_PARSED` once `<head>` is parsed, `COMPLETE` once the document and
+/// all its subresources have loaded (`document.readyState == "complete"`).
+/// Same-document navigations (fragments, `history.pushState`) report nothing.
+/// Pass a NULL `callback` to clear it.
+///
+/// # Safety
+/// `webview` must be a valid handle. `user_data` is stored verbatim and handed
+/// back to the callback; its lifetime is the caller's responsibility.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_set_load_status_changed_callback(
+    webview: *mut ServoWebViewHandle,
+    callback: Option<ServoLoadStatusChangedCallback>,
+    user_data: *mut c_void,
+) {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return;
+    };
+    *handle.delegate.load_status_callback.borrow_mut() =
+        callback.map(|func| LoadStatusCallback { func, user_data });
+}
+
+/// The current load status, a `SERVO_LOAD_STATUS_*` value. A NULL handle
+/// reports `SERVO_LOAD_STATUS_COMPLETE` (nothing is loading).
+///
+/// # Safety
+/// `webview` must be NULL or a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_get_load_status(webview: *mut ServoWebViewHandle) -> u32 {
+    match unsafe { as_handle(webview) } {
+        Some(handle) => load_status_to_c(handle.webview.load_status()),
+        None => servo_load_status::COMPLETE,
+    }
+}
+
 /// Begin loading `uri`. Invalid URLs are ignored.
 ///
 /// # Safety
@@ -874,7 +954,14 @@ pub unsafe extern "C" fn servo_webview_load_uri(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn servo_webview_reload(webview: *mut ServoWebViewHandle) {
     if let Some(handle) = unsafe { as_handle(webview) } {
+        // `WebView::reload` sets the status to `Started` without telling the
+        // delegate, and the constellation's own `Started` is then dropped as
+        // "unchanged" -- so report it here or the reload would never start.
+        let previous = handle.webview.load_status();
         handle.webview.reload();
+        if previous != LoadStatus::Started {
+            handle.delegate.report_load_status(LoadStatus::Started);
+        }
     }
 }
 

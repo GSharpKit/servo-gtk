@@ -48,6 +48,26 @@ typedef struct ServoWebViewHandle ServoWebViewHandle;
 #define SERVO_GTK_IS_WEB_VIEW_GET_CLASS(obj)   (G_TYPE_INSTANCE_GET_CLASS ((obj), SERVO_GTK_TYPE_WEB_VIEW, ServoGtkWebViewClass))
 
 
+/**
+ * ServoGtkLoadEvent:
+ * @SERVO_GTK_LOAD_STARTED: a new page started loading
+ * @SERVO_GTK_LOAD_HEAD_PARSED: the page's `<head>` has been parsed; its
+ *   `<body>` now exists in the DOM
+ * @SERVO_GTK_LOAD_FINISHED: the page and all its subresources (images,
+ *   stylesheets, scripts) have loaded, i.e. `document.readyState` is
+ *   `"complete"`
+ *
+ * The stages of a page load, reported by #ServoGtkWebView::load-changed.
+ */
+typedef enum {
+    SERVO_GTK_LOAD_STARTED,
+    SERVO_GTK_LOAD_HEAD_PARSED,
+    SERVO_GTK_LOAD_FINISHED
+} ServoGtkLoadEvent;
+
+#define SERVO_GTK_TYPE_LOAD_EVENT (servo_gtk_load_event_get_type ())
+GType servo_gtk_load_event_get_type (void) G_GNUC_CONST;
+
 typedef struct _ServoGtkWebView              ServoGtkWebView;
 typedef struct _ServoGtkWebViewPrivate       ServoGtkWebViewPrivate;
 typedef struct _ServoGtkWebViewClass         ServoGtkWebViewClass;
@@ -75,9 +95,10 @@ struct _ServoGtkWebViewClass {
     /* Signals */
     void (*uri_changed) (ServoGtkWebView *web_view,
                          const gchar     *uri);
+    void (*load_changed) (ServoGtkWebView   *web_view,
+                          ServoGtkLoadEvent  load_event);
 
     /* Padding for future expansion */
-    void (*_gtk_reserved1) (void);
     void (*_gtk_reserved2) (void);
     void (*_gtk_reserved3) (void);
     void (*_gtk_reserved4) (void);
@@ -110,6 +131,18 @@ void servo_gtk_web_view_load_uri(ServoGtkWebView *self, const gchar *uri);
  * Returns: (nullable): the current URI
  */
 const gchar *servo_gtk_web_view_get_uri(ServoGtkWebView *self);
+
+/**
+ * servo_gtk_web_view_is_loading:
+ * @self: a #ServoGtkWebView
+ *
+ * Whether a page is loading: %TRUE from #SERVO_GTK_LOAD_STARTED until
+ * #SERVO_GTK_LOAD_FINISHED. Also available as the #ServoGtkWebView:is-loading
+ * property.
+ *
+ * Returns: %TRUE while a page is loading
+ */
+gboolean servo_gtk_web_view_is_loading(ServoGtkWebView *self);
 
 /**
  * ServoGtkScriptResultCallback:

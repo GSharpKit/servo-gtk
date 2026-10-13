@@ -448,6 +448,19 @@ tab_title_for_uri(const gchar *uri)
     return g_strdup(uri);
 }
 
+/* Page load progress: print it, the way a browser would drive a spinner. */
+static void
+on_web_view_load_changed(ServoGtkWebView *web_view, ServoGtkLoadEvent load_event, gpointer user_data)
+{
+    DemoTab    *tab = user_data;
+    const char *name = load_event == SERVO_GTK_LOAD_STARTED     ? "started"
+                     : load_event == SERVO_GTK_LOAD_HEAD_PARSED ? "head parsed"
+                     :                                            "finished";
+
+    g_print("tab %u: load %s (is-loading=%s)\n", tab->id, name,
+            servo_gtk_web_view_is_loading(web_view) ? "true" : "false");
+}
+
 /* The web view navigated to a new URL: print it and reflect it in the tab. */
 static void
 on_web_view_uri_changed(ServoGtkWebView *web_view, const gchar *uri, gpointer user_data)
@@ -640,6 +653,7 @@ add_tab(DemoWindow *win, const gchar *uri)
 
     /* Print and reflect URL changes reported by Servo (navigation, redirects). */
     g_signal_connect(web_view, "uri-changed", G_CALLBACK(on_web_view_uri_changed), tab);
+    g_signal_connect(web_view, "load-changed", G_CALLBACK(on_web_view_load_changed), tab);
 
     /*
      * ServoGtkWebView implements GtkScrollable, so putting it in a

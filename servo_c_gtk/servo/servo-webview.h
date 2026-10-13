@@ -130,6 +130,29 @@ void servo_webview_set_url_changed_callback(ServoWebViewHandle     *webview,
                                             void                   *user_data);
 
 /*
+ * Load status values passed to ServoLoadStatusChangedCallback. Part of the
+ * ABI; keep in sync with `servo_load_status` in servo-webview.rs.
+ */
+enum {
+    SERVO_LOAD_STATUS_STARTED     = 0, /* navigation began, headers not parsed */
+    SERVO_LOAD_STATUS_HEAD_PARSED = 1, /* <head> parsed, <body> exists */
+    SERVO_LOAD_STATUS_COMPLETE    = 2  /* document and subresources loaded */
+};
+
+/*
+ * Invoked when the page's load status changes. Same-document navigations
+ * (fragments, history.pushState) report nothing.
+ */
+typedef void (*ServoLoadStatusChangedCallback)(uint32_t status, void *user_data);
+
+void servo_webview_set_load_status_changed_callback(ServoWebViewHandle            *webview,
+                                                    ServoLoadStatusChangedCallback callback,
+                                                    void                          *user_data);
+
+/* The current SERVO_LOAD_STATUS_* value; COMPLETE for a NULL handle. */
+uint32_t servo_webview_get_load_status(ServoWebViewHandle *webview);
+
+/*
  * Console log levels passed to ServoConsoleMessageCallback. Part of the ABI;
  * keep in sync with the `servo_console` module in servo-webview.rs.
  */
