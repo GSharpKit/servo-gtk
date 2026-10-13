@@ -1,10 +1,23 @@
 /*
  * GTK4 web view widget backed by Servo.
  *
- * Rendering is CPU-only: Servo rasterizes into its own framebuffer with the
- * swgl software rasterizer and this widget blits the finished RGBA frames
- * with Cairo. No GL implementation, driver or GPU is required by the widget
- * or by the engine.
+ * The widget is a plain GtkWidget holding one child that does the drawing:
+ *
+ *   - a GtkGLArea when GTK can give it a GL context (GL 3.2 / GLES 3.0 or
+ *     newer). Servo then renders on the GPU in the area's own context and the
+ *     frame is blitted into the area -- it never goes through the CPU.
+ *   - a GtkDrawingArea otherwise. Servo rasterizes on the CPU with the swgl
+ *     software rasterizer and the RGBA frames are painted with Cairo. No GL
+ *     implementation, driver or GPU is needed by the widget or the engine.
+ *
+ * The choice is made per widget and falls back by itself: if the GL area
+ * cannot be realized, or its context is unusable, the widget switches to the
+ * drawing area. Set SERVO_GTK_RENDERER=cpu to skip the GL attempt.
+ *
+ * A GL web view is shut down when it is unrealized (its context goes away
+ * with the GL area), and freeing the last web view shuts Servo down for the
+ * process. Do not unrealize and re-realize the only web view -- e.g. by
+ * moving it to another window -- and expect it to come back.
  *
  * GTK4 itself is a different matter. GSK's default renderer wants OpenGL,
  * which on Windows it reaches through libepoxy loading ANGLE's libEGL.dll and
@@ -14,8 +27,8 @@
  *
  *     g_setenv("GSK_RENDERER", "cairo", FALSE);
  *
- * (demo/servo-gtk4-demo.c does exactly this.) It costs the web view nothing,
- * because the frames are Cairo blits either way.
+ * (demo/servo-gtk4-demo.c does exactly this.) The web view then takes the CPU
+ * path; with the Cairo renderer a GL area would be read back to the CPU anyway.
  */
 #ifndef SERVO_GTK4_VIEW_H
 #define SERVO_GTK4_VIEW_H
@@ -43,7 +56,7 @@ GType servo_gtk_web_view_get_type (void) G_GNUC_CONST;
 
 struct _ServoGtkWebView
 {
-    GtkDrawingArea web_view;
+    GtkWidget web_view;
 
     gchar *uri;
 
@@ -57,7 +70,7 @@ struct _ServoGtkWebView
 };
 
 struct _ServoGtkWebViewClass {
-    GtkDrawingAreaClass parent_class;
+    GtkWidgetClass parent_class;
 
     /* Signals */
     void (*uri_changed) (ServoGtkWebView *web_view,

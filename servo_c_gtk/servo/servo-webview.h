@@ -4,12 +4,20 @@
  * All functions must be called from a single thread (the GTK main thread):
  * the underlying Servo objects are not thread-safe.
  *
- * Typical use from a GtkDrawingArea:
+ * Typical use from a GtkDrawingArea (CPU rendering, needs no GL at all):
  *   1. servo_webview_new()
  *   2. servo_webview_set_frame_ready_callback() -> copy RGBA into a texture
  *   3. drive servo_webview_spin() from a GtkWidget tick callback
  *   4. forward input via servo_webview_pointer_* / servo_webview_scroll
  *   5. servo_webview_free() on dispose
+ *
+ * Or from a GtkGLArea (GPU rendering in the area's own context):
+ *   1. servo_webview_new_gl() once the area is realized; on NULL fall back
+ *      to the GtkDrawingArea path above
+ *   2. servo_webview_set_gl_frame_ready_callback() -> gtk_gl_area_queue_render()
+ *   3. servo_webview_gl_blit() from the area's "render" handler
+ *   4. as above
+ *   5. servo_webview_free() before the area is unrealized
  */
 #ifndef SERVO_WEBVIEW_H
 #define SERVO_WEBVIEW_H
@@ -62,6 +70,37 @@ ServoWebViewHandle *servo_webview_new(uint32_t    width,
                                       uint32_t    height,
                                       const char *initial_uri);
 
+/*
+ * Makes the host's GL context current on the calling thread; returns whether
+ * it succeeded (false: no context, issue no GL).
+ */
+typedef bool (*ServoGlMakeCurrentCallback)(void *user_data);
+
+/*
+ * Invoked once per painted frame on a servo_webview_new_gl() handle. The frame
+ * is in the handle's offscreen framebuffer; schedule a redraw and copy it out
+ * with servo_webview_gl_blit().
+ */
+typedef void (*ServoGlFrameReadyCallback)(void *user_data);
+
+/*
+ * Like servo_webview_new(), but Servo renders on the GPU inside a GL context
+ * the host owns, e.g. a GtkGLArea's. That context must exist, `make_current`
+ * must make it current (gtk_gl_area_make_current() and no gtk_gl_area_get_error()),
+ * and it must outlive the handle: Servo calls `make_current` from this thread
+ * during this call, while painting and during servo_webview_free(). The RGBA
+ * frame callback is never invoked for such a handle.
+ *
+ * Returns NULL if the context is unusable (older than GL 3.2 / GLES 3.0, not
+ * owned by EGL/GLX/WGL/CGL, ...) or Servo has been shut down; fall back to
+ * servo_webview_new() in the first case.
+ */
+ServoWebViewHandle *servo_webview_new_gl(uint32_t                   width,
+                                         uint32_t                   height,
+                                         const char                *initial_uri,
+                                         ServoGlMakeCurrentCallback make_current,
+                                         void                      *user_data);
+
 /* Destroy a handle. NULL is a no-op. */
 void servo_webview_free(ServoWebViewHandle *webview);
 
@@ -69,6 +108,20 @@ void servo_webview_free(ServoWebViewHandle *webview);
 void servo_webview_set_frame_ready_callback(ServoWebViewHandle     *webview,
                                             ServoFrameReadyCallback callback,
                                             void                   *user_data);
+void servo_webview_set_gl_frame_ready_callback(ServoWebViewHandle       *webview,
+                                               ServoGlFrameReadyCallback callback,
+                                               void                     *user_data);
+
+/*
+ * Copy the last painted frame of a servo_webview_new_gl() handle into the
+ * framebuffer currently bound for drawing, scaled to width x height device
+ * pixels. Call from the GtkGLArea "render" handler. Returns false (drawing
+ * nothing) for a CPU handle.
+ */
+bool servo_webview_gl_blit(ServoWebViewHandle *webview,
+                           uint32_t            width,
+                           uint32_t            height);
+
 void servo_webview_set_cursor_changed_callback(ServoWebViewHandle        *webview,
                                                ServoCursorChangedCallback callback,
                                                void                      *user_data);

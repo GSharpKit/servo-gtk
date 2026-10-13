@@ -72,9 +72,25 @@ struct _ServoGtkWebViewPrivate {
     /* Adjustments are being updated from the page, so value-changed must not
      * be echoed back to it. */
     gboolean       syncing;
+    /* The child, which does the drawing: a GtkGLArea while use_gl is set
+     * (Servo renders into its context), a GtkDrawingArea otherwise. */
+    GtkWidget     *area;
+    gboolean       use_gl;
+    /* The GL area's framebuffer size in device pixels, from its "resize". */
+    gint           gl_width;
+    gint           gl_height;
 };
 
-G_DEFINE_TYPE_WITH_CODE(ServoGtkWebView, servo_gtk_web_view, GTK_TYPE_DRAWING_AREA,
+/* Input the child has to select: events reach this widget by bubbling up. */
+#define SERVO_GTK_EVENT_MASK (GDK_POINTER_MOTION_MASK  \
+                              | GDK_BUTTON_PRESS_MASK   \
+                              | GDK_BUTTON_RELEASE_MASK \
+                              | GDK_SCROLL_MASK         \
+                              | GDK_SMOOTH_SCROLL_MASK  \
+                              | GDK_KEY_PRESS_MASK      \
+                              | GDK_KEY_RELEASE_MASK)
+
+G_DEFINE_TYPE_WITH_CODE(ServoGtkWebView, servo_gtk_web_view, GTK_TYPE_BIN,
                         G_IMPLEMENT_INTERFACE(GTK_TYPE_SCROLLABLE, NULL))
 
 /*
@@ -148,7 +164,68 @@ servo_gtk_web_view_on_frame_ready(const guint8 *rgba,
     g_clear_object(&self->frame);
     self->frame = pixbuf;
 
-    gtk_widget_queue_draw(GTK_WIDGET(self));
+    gtk_widget_queue_draw(self->priv->area);
+}
+
+/*
+ * GL path: Servo has painted a frame into its offscreen framebuffer, inside
+ * the GL area's context. Have the area render, which blits it.
+ */
+static void
+servo_gtk_web_view_on_gl_frame_ready(gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    gtk_gl_area_queue_render(GTK_GL_AREA(self->priv->area));
+}
+
+/*
+ * ServoGlMakeCurrentCallback: Servo needs the GL area's context. Going through
+ * GDK rather than GLX/EGL/WGL directly keeps GDK's idea of the current context
+ * right, which it relies on to skip redundant MakeCurrent calls.
+ */
+static bool
+servo_gtk_web_view_gl_make_current(void *user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+    GtkGLArea       *area = GTK_GL_AREA(self->priv->area);
+
+    if (!gtk_widget_get_realized(GTK_WIDGET(area))) {
+        return false;
+    }
+
+    gtk_gl_area_make_current(area);
+
+    return gtk_gl_area_get_error(area) == NULL && gtk_gl_area_get_context(area) != NULL;
+}
+
+/*
+ * The GdkWindow the pointer is over. The drawing area has its own; the GL area
+ * has none and receives input through a private input-only child of its
+ * parent's window. Either way it is the window whose user data is the area --
+ * setting the cursor on this widget's own window would set it on the
+ * toplevel, as a GtkBin has no window of its own.
+ */
+static GdkWindow *
+servo_gtk_web_view_event_window(ServoGtkWebView *self)
+{
+    GtkWidget *area = self->priv->area;
+    GdkWindow *window = gtk_widget_get_window(area);
+
+    if (window == NULL || gtk_widget_get_has_window(area)) {
+        return window;
+    }
+
+    for (GList *l = gdk_window_peek_children(window); l != NULL; l = l->next) {
+        gpointer owner = NULL;
+
+        gdk_window_get_user_data(l->data, &owner);
+        if (owner == area) {
+            return l->data;
+        }
+    }
+
+    return NULL;
 }
 
 static void
@@ -156,7 +233,7 @@ servo_gtk_web_view_on_cursor_changed(const char *name, gpointer user_data)
 {
     ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
     GtkWidget       *widget = GTK_WIDGET(self);
-    GdkWindow       *window = gtk_widget_get_window(widget);
+    GdkWindow       *window = servo_gtk_web_view_event_window(self);
 
     if (window == NULL) {
         return;
@@ -469,6 +546,7 @@ servo_gtk_web_view_dispose(GObject *object)
 
     g_clear_object(&self->frame);
 
+    /* Before the child goes: a GL handle still needs the area's context. */
     if (self->servo != NULL) {
         servo_webview_free(self->servo);
         self->servo = NULL;
@@ -488,10 +566,13 @@ servo_gtk_web_view_finalize(GObject *object)
     G_OBJECT_CLASS(servo_gtk_web_view_parent_class)->finalize(object);
 }
 
+/* GtkWidget::draw on the drawing area, CPU path. */
 static gboolean
-servo_gtk_web_view_draw(GtkWidget *widget, cairo_t *cr)
+servo_gtk_web_view_draw(GtkWidget *area, cairo_t *cr, gpointer user_data)
 {
-    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(widget);
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    (void) area;
 
     if (self->frame != NULL) {
         gdk_cairo_set_source_pixbuf(cr, self->frame, 0, 0);
@@ -506,18 +587,141 @@ servo_gtk_web_view_draw(GtkWidget *widget, cairo_t *cr)
 }
 
 /*
+ * GtkGLArea::render, GL path: GTK has made the area's context current and
+ * bound its framebuffer; copy Servo's last frame into it. Before Servo exists
+ * the offscreen framebuffer does not either, so leave the area to GTK.
+ */
+static gboolean
+servo_gtk_web_view_on_gl_render(GtkGLArea    *area,
+                                GdkGLContext *context,
+                                gpointer      user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    (void) area;
+    (void) context;
+
+    if (self->servo == NULL) {
+        return FALSE;
+    }
+
+    return servo_webview_gl_blit(self->servo,
+                                 (guint) MAX(1, self->priv->gl_width),
+                                 (guint) MAX(1, self->priv->gl_height));
+}
+
+/*
+ * GtkGLArea::resize reports the framebuffer size in device pixels, which is
+ * what the blit has to fill. (Servo itself is sized from the allocation.)
+ */
+static void
+servo_gtk_web_view_on_gl_resize(GtkGLArea *area,
+                                gint       width,
+                                gint       height,
+                                gpointer   user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    (void) area;
+
+    self->priv->gl_width = width;
+    self->priv->gl_height = height;
+}
+
+static gboolean servo_gtk_web_view_create_idle(gpointer user_data);
+
+/* GtkGLArea::realize (after): the context exists now, or failed to. */
+static void
+servo_gtk_web_view_on_gl_realize(GtkWidget *area, gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    (void) area;
+
+    if (self->servo == NULL && self->create_idle_id == 0) {
+        self->create_idle_id = g_idle_add(servo_gtk_web_view_create_idle, self);
+    }
+}
+
+/*
+ * GtkGLArea::unrealize, which runs before the area destroys its context: the
+ * GL handle's WebRender objects live in that context, so the handle has to go
+ * now. Freeing the last handle shuts Servo down for the process.
+ */
+static void
+servo_gtk_web_view_on_gl_unrealize(GtkWidget *area, gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    (void) area;
+
+    if (self->servo != NULL) {
+        servo_webview_free(self->servo);
+        self->servo = NULL;
+        servo_gtk_web_view_update_scroll_polling(self);
+    }
+}
+
+/* SERVO_GTK_RENDERER=cpu skips the GL area; anything else lets GL be tried. */
+static gboolean
+servo_gtk_web_view_wants_gl(void)
+{
+    return g_strcmp0(g_getenv("SERVO_GTK_RENDERER"), "cpu") != 0;
+}
+
+/* Replace the drawing child with a GtkGLArea (use_gl) or a GtkDrawingArea. */
+static void
+servo_gtk_web_view_set_area(ServoGtkWebView *self, gboolean use_gl)
+{
+    ServoGtkWebViewPrivate *priv = self->priv;
+
+    if (priv->area != NULL) {
+        gtk_container_remove(GTK_CONTAINER(self), priv->area);
+        priv->area = NULL;
+    }
+
+    priv->use_gl = use_gl;
+    priv->gl_width = 0;
+    priv->gl_height = 0;
+
+    if (use_gl) {
+        priv->area = gtk_gl_area_new();
+        g_signal_connect(priv->area, "render",
+                         G_CALLBACK(servo_gtk_web_view_on_gl_render), self);
+        g_signal_connect(priv->area, "resize",
+                         G_CALLBACK(servo_gtk_web_view_on_gl_resize), self);
+        g_signal_connect_after(priv->area, "realize",
+                               G_CALLBACK(servo_gtk_web_view_on_gl_realize), self);
+        g_signal_connect(priv->area, "unrealize",
+                         G_CALLBACK(servo_gtk_web_view_on_gl_unrealize), self);
+    } else {
+        priv->area = gtk_drawing_area_new();
+        g_signal_connect(priv->area, "draw", G_CALLBACK(servo_gtk_web_view_draw), self);
+    }
+
+    gtk_widget_add_events(priv->area, SERVO_GTK_EVENT_MASK);
+    gtk_container_add(GTK_CONTAINER(self), priv->area);
+    gtk_widget_show(priv->area);
+}
+
+/*
  * Create the Servo instance, from the main loop rather than from inside
  * size_allocate(). GTK3 allocates synchronously from gtk_widget_show(), while
  * the widget is still being realized, so the allocation seen there has not
  * settled yet. Running at idle instead means Servo is built against a realized
  * window and a settled allocation -- the same point in the frame that GTK4's
  * frame-clock-driven "resize" signal already fires at.
+ *
+ * On the GL path this also waits for the GL area's context (its realize
+ * schedules this again), and falls back to the drawing area if the context is
+ * unusable -- safe here, outside allocation.
  */
 static gboolean
 servo_gtk_web_view_create_idle(gpointer user_data)
 {
-    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
-    GtkAllocation    allocation;
+    ServoGtkWebView        *self = SERVO_GTK_WEB_VIEW(user_data);
+    ServoGtkWebViewPrivate *priv = self->priv;
+    GtkAllocation           allocation;
 
     self->create_idle_id = 0;
 
@@ -526,18 +730,47 @@ servo_gtk_web_view_create_idle(gpointer user_data)
     }
 
     gtk_widget_get_allocation(GTK_WIDGET(self), &allocation);
+    guint width = (guint) MAX(1, allocation.width);
+    guint height = (guint) MAX(1, allocation.height);
 
     /*
      * Pass any URI requested before creation as the initial URL: Servo creates
      * the browsing context together with it. Issuing a separate load here
      * instead would race the context's creation and be dropped.
      */
-    self->servo = servo_webview_new((guint) MAX(1, allocation.width),
-                                    (guint) MAX(1, allocation.height),
-                                    self->uri);
+    if (priv->use_gl) {
+        GtkGLArea *area = GTK_GL_AREA(priv->area);
+
+        if (!gtk_widget_get_realized(priv->area)) {
+            return G_SOURCE_REMOVE; /* servo_gtk_web_view_on_gl_realize calls back */
+        }
+
+        if (gtk_gl_area_get_error(area) == NULL) {
+            self->servo = servo_webview_new_gl(width, height, self->uri,
+                                               servo_gtk_web_view_gl_make_current, self);
+        }
+
+        if (self->servo != NULL) {
+            servo_webview_set_gl_frame_ready_callback(
+                self->servo, servo_gtk_web_view_on_gl_frame_ready, self);
+        } else {
+            GError *error = gtk_gl_area_get_error(area);
+
+            g_message("Servo: no usable GL context (%s); rendering on the CPU.",
+                      error != NULL ? error->message : "see the message above");
+            servo_gtk_web_view_set_area(self, FALSE);
+        }
+    }
+
+    if (!priv->use_gl) {
+        self->servo = servo_webview_new(width, height, self->uri);
+        if (self->servo != NULL) {
+            servo_webview_set_frame_ready_callback(
+                self->servo, servo_gtk_web_view_on_frame_ready, self);
+        }
+    }
+
     if (self->servo != NULL) {
-        servo_webview_set_frame_ready_callback(
-            self->servo, servo_gtk_web_view_on_frame_ready, self);
         servo_webview_set_cursor_changed_callback(
             self->servo, servo_gtk_web_view_on_cursor_changed, self);
         servo_webview_set_url_changed_callback(
@@ -546,9 +779,9 @@ servo_gtk_web_view_create_idle(gpointer user_data)
         servo_gtk_web_view_update_scroll_polling(self);
     } else {
         /*
-         * The engine could not build a rendering context at all. Rasterization
-         * is pure CPU and needs no GL, driver or GPU, so this is not about
-         * graphics hardware; the reason is printed by the Rust side.
+         * The CPU path needs no GL, driver or GPU, so this is not about
+         * graphics hardware: most likely Servo was already shut down, because
+         * the last web view was freed. The Rust side says why.
          */
         g_warning("Servo: the engine could not be created; the web view stays blank.");
     }
@@ -557,10 +790,10 @@ servo_gtk_web_view_create_idle(gpointer user_data)
 }
 
 /*
- * The Servo instance is created lazily once the widget has a real size, and
- * resized on subsequent allocations. Creation itself is deferred to an idle
- * (see servo_gtk_web_view_create_idle) because GTK3 allocates from inside
- * gtk_widget_show()/realize.
+ * The child gets the whole allocation. The Servo instance is created lazily
+ * once the widget has a real size, and resized on subsequent allocations.
+ * Creation itself is deferred to an idle (see servo_gtk_web_view_create_idle)
+ * because GTK3 allocates from inside gtk_widget_show()/realize.
  */
 static void
 servo_gtk_web_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation)
@@ -568,6 +801,11 @@ servo_gtk_web_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation)
     GTK_WIDGET_CLASS(servo_gtk_web_view_parent_class)->size_allocate(widget, allocation);
 
     ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(widget);
+
+    gtk_widget_set_allocation(widget, allocation);
+    if (self->priv->area != NULL && gtk_widget_get_visible(self->priv->area)) {
+        gtk_widget_size_allocate(self->priv->area, allocation);
+    }
 
     if (self->servo == NULL) {
         if (self->create_idle_id == 0) {
@@ -578,6 +816,24 @@ servo_gtk_web_view_size_allocate(GtkWidget *widget, GtkAllocation *allocation)
                              (guint) MAX(1, allocation->width),
                              (guint) MAX(1, allocation->height));
     }
+}
+
+/*
+ * The child is never focusable, so GtkContainer's default -- move focus into
+ * the children -- would skip the web view on Tab. Take focus here instead.
+ */
+static gboolean
+servo_gtk_web_view_focus(GtkWidget *widget, GtkDirectionType direction)
+{
+    (void) direction;
+
+    if (gtk_widget_has_focus(widget)) {
+        return FALSE;
+    }
+
+    gtk_widget_grab_focus(widget);
+
+    return TRUE;
 }
 
 static gboolean
@@ -760,8 +1016,8 @@ servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
     object_class->dispose = servo_gtk_web_view_dispose;
     object_class->finalize = servo_gtk_web_view_finalize;
 
-    widget_class->draw = servo_gtk_web_view_draw;
     widget_class->size_allocate = servo_gtk_web_view_size_allocate;
+    widget_class->focus = servo_gtk_web_view_focus;
     widget_class->motion_notify_event = servo_gtk_web_view_motion_notify;
     widget_class->button_press_event = servo_gtk_web_view_button_press;
     widget_class->button_release_event = servo_gtk_web_view_button_release;
@@ -816,17 +1072,15 @@ servo_gtk_web_view_init(ServoGtkWebView *self)
 
     GtkWidget *widget = GTK_WIDGET(self);
 
+    /* The child draws and receives the input; unhandled events bubble up to
+     * the handlers here, in the child's coordinates -- which are this
+     * widget's, as the child fills it. */
+    gtk_widget_set_has_window(widget, FALSE);
     gtk_widget_set_can_focus(widget, TRUE);
-    gtk_widget_add_events(
-        widget,
-        GDK_POINTER_MOTION_MASK
-        | GDK_BUTTON_PRESS_MASK
-        | GDK_BUTTON_RELEASE_MASK
-        | GDK_SCROLL_MASK
-        | GDK_SMOOTH_SCROLL_MASK
-        | GDK_KEY_PRESS_MASK
-        | GDK_KEY_RELEASE_MASK
-    );
+    gtk_widget_add_events(widget, SERVO_GTK_EVENT_MASK);
+
+    /* GL first if allowed; servo_gtk_web_view_create_idle swaps it out. */
+    servo_gtk_web_view_set_area(self, servo_gtk_web_view_wants_gl());
 
     self->tick_id = gtk_widget_add_tick_callback(widget, servo_gtk_web_view_tick, NULL, NULL);
 }

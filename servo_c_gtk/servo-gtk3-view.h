@@ -1,3 +1,26 @@
+/*
+ * GTK3 web view widget backed by Servo.
+ *
+ * The widget is a GtkBin holding one child that does the drawing:
+ *
+ *   - a GtkGLArea when GTK can give it a GL context (GL 3.2 / GLES 3.0 or
+ *     newer). Servo then renders on the GPU in the area's own context and the
+ *     frame is blitted into the area.
+ *   - a GtkDrawingArea otherwise. Servo rasterizes on the CPU with the swgl
+ *     software rasterizer and the RGBA frames are painted with Cairo. No GL
+ *     implementation, driver or GPU is needed by the widget or the engine.
+ *
+ * The choice is made per widget and falls back by itself: if the GL area
+ * cannot be realized, or its context is unusable, the widget switches to the
+ * drawing area. Set SERVO_GTK_RENDERER=cpu to skip the GL attempt.
+ *
+ * Do not add or remove the child yourself.
+ *
+ * A GL web view is shut down when it is unrealized (its context goes away
+ * with the GL area), and freeing the last web view shuts Servo down for the
+ * process. Do not unrealize and re-realize the only web view -- e.g. by
+ * moving it to another window -- and expect it to come back.
+ */
 #ifndef SERVO_GTK_WEB_VIEW_H
 #define SERVO_GTK_WEB_VIEW_H
 
@@ -24,7 +47,7 @@ GType servo_gtk_web_view_get_type (void) G_GNUC_CONST;
 
 struct _ServoGtkWebView
 {
-    GtkDrawingArea web_view;
+    GtkBin web_view;
 
     gchar *uri;
 
@@ -39,7 +62,7 @@ struct _ServoGtkWebView
 };
 
 struct _ServoGtkWebViewClass {
-    GtkDrawingAreaClass parent_class;
+    GtkBinClass parent_class;
 
     /* Signals */
     void (*uri_changed) (ServoGtkWebView *web_view,

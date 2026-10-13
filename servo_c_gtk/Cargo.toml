@@ -77,13 +77,22 @@ libc = "0.2"
 # Cost: WebGL and WebGPU canvases no longer render, because there is no GPU
 # context to hand them. Everything else -- HTML, CSS, text, images, video --
 # rasterizes on the CPU.
+#
+# swgl stays the baseline, not the only path. When the host has GL -- the
+# GTK widgets realize a GtkGLArea and get a context -- Servo renders on the
+# GPU inside *that* context instead (`servo/servo-host-gl-context.rs`), and
+# the frame is blitted into the area without a CPU round-trip. That costs no
+# new dependency and no link-time GL: the entry points are looked up at
+# runtime, and only in GL libraries GTK already loaded, so a machine without
+# GL still loads this library and simply takes the swgl path.
 swgl = "0.70"
 # Only to name the types in the `RenderingContext` impl. All three MUST stay at
 # whatever the servo graph already resolves, or Cargo builds a second, distinct
 # copy and the trait no longer lines up:
 #   * gleam -- `RenderingContext::gleam_gl_api` returns `Rc<dyn gleam::gl::Gl>`,
 #     and `swgl::Context` implements that trait.
-#   * glow  -- only for the `glow_gl_api` signature; nothing in Servo calls it.
+#   * glow  -- for the `glow_gl_api` signature. The host GL context fills it
+#     in from the same loader as gleam; nothing in Servo calls it today.
 #   * surfman -- `Connection` and `Error` appear in the trait and `servo` does
 #     not re-export them. Featureless on purpose: adding features here (this is
 #     where `sm-angle-default` used to live) changes the backend for every

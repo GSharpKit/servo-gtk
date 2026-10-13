@@ -799,20 +799,24 @@ main(int argc, char **argv)
     GtkApplication *app;
     int status;
 
+#ifdef G_OS_WIN32
     /*
-     * Ask GSK for the Cairo renderer unless the user picked one.
+     * On Windows, ask GSK for the Cairo renderer unless the user picked one.
      *
-     * The web view itself never needs GL -- Servo rasterizes on the CPU and
-     * this widget blits the finished frames with Cairo -- but GTK4's own
-     * default renderer does. On Windows GSK reaches OpenGL through libepoxy,
-     * which loads ANGLE's libEGL.dll / libGLESv2.dll; on a machine with no GL
-     * those are absent and GSK has nothing to fall back to before the window
-     * is up. GTK3 is unaffected because it draws through GDI/Cairo already.
+     * The web view never needs GL -- without it, Servo rasterizes on the CPU
+     * and the widget blits the frames with Cairo -- but GTK4's own default
+     * renderer does. On Windows GSK reaches OpenGL through libepoxy, which
+     * loads ANGLE's libEGL.dll / libGLESv2.dll; on a machine with no GL those
+     * are absent and GSK has nothing to fall back to before the window is up.
+     * Elsewhere GSK falls back to Cairo by itself, so GL stays available to
+     * the web view's GtkGLArea. GTK3 is unaffected because it draws through
+     * GDI/Cairo already.
      *
      * TRUE would override a deliberate choice, so pass FALSE: GSK_RENDERER=ngl
      * in the environment still wins on machines that do have GL.
      */
     g_setenv("GSK_RENDERER", "cairo", FALSE);
+#endif
 
     app = gtk_application_new(
         "org.example.ServoGtk4Demo",

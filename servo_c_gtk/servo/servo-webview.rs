@@ -58,6 +58,13 @@ mod swgl_context;
 
 use swgl_context::SwglRenderingContext;
 
+/// GPU rendering inside a GL context the host already owns (a `GtkGLArea`'s).
+/// Used only when the host offers one; see [`servo_webview_new_gl`].
+#[path = "servo-host-gl-context.rs"]
+mod host_gl_context;
+
+use host_gl_context::{HostGlRenderingContext, ServoGlMakeCurrentCallback};
+
 /// Called once per rendered frame with a tightly-packed RGBA8 buffer.
 ///
 /// The pointer is only valid for the duration of the call; the host **must**
@@ -65,6 +72,11 @@ use swgl_context::SwglRenderingContext;
 /// the stride is always `width * 4` bytes.
 pub type ServoFrameReadyCallback =
     extern "C" fn(rgba: *const u8, width: u32, height: u32, user_data: *mut c_void);
+
+/// Called once per painted frame on a [`servo_webview_new_gl`] handle. The
+/// frame is already in the handle's offscreen framebuffer; the host should
+/// schedule a redraw and copy it out with [`servo_webview_gl_blit`].
+pub type ServoGlFrameReadyCallback = extern "C" fn(user_data: *mut c_void);
 
 /// Called when the page requests a different cursor. `name` is a
 /// NUL-terminated CSS cursor name (e.g. `"pointer"`), valid only for the
@@ -106,6 +118,11 @@ struct FrameCallback {
     user_data: *mut c_void,
 }
 
+struct GlFrameCallback {
+    func: ServoGlFrameReadyCallback,
+    user_data: *mut c_void,
+}
+
 struct CursorCallback {
     func: ServoCursorChangedCallback,
     user_data: *mut c_void,
@@ -120,17 +137,23 @@ struct UrlCallback {
 /// into calls into the registered C callbacks.
 struct EmbedderDelegate {
     rendering_context: Rc<dyn RenderingContext>,
+    /// Frames stay on the GPU, in the host's GL context: they are announced
+    /// through `gl_frame_callback` instead of being read back.
+    host_gl: bool,
     frame_callback: RefCell<Option<FrameCallback>>,
+    gl_frame_callback: RefCell<Option<GlFrameCallback>>,
     cursor_callback: RefCell<Option<CursorCallback>>,
     url_callback: RefCell<Option<UrlCallback>>,
     console_callback: RefCell<Option<ConsoleCallback>>,
 }
 
 impl EmbedderDelegate {
-    fn new(rendering_context: Rc<dyn RenderingContext>) -> Self {
+    fn new(rendering_context: Rc<dyn RenderingContext>, host_gl: bool) -> Self {
         Self {
             rendering_context,
+            host_gl,
             frame_callback: RefCell::new(None),
+            gl_frame_callback: RefCell::new(None),
             cursor_callback: RefCell::new(None),
             url_callback: RefCell::new(None),
             console_callback: RefCell::new(None),
@@ -140,6 +163,23 @@ impl EmbedderDelegate {
 
 impl WebViewDelegate for EmbedderDelegate {
     fn notify_new_frame_ready(&self, webview: WebView) {
+        if self.host_gl {
+            // Painted into the offscreen framebuffer; the host blits it from
+            // its own render handler, so there is nothing to read back.
+            webview.paint();
+            self.rendering_context.present();
+
+            let cb = self
+                .gl_frame_callback
+                .borrow()
+                .as_ref()
+                .map(|c| (c.func, c.user_data));
+            if let Some((func, user_data)) = cb {
+                func(user_data);
+            }
+            return;
+        }
+
         // Paint the frame, read it back, then present. `read_to_image` reads the
         // *back* buffer, which is what `paint()` just wrote; `present()` swaps it
         // out (with `PreserveBuffer::No`), so reading must happen *before*
@@ -229,7 +269,15 @@ pub struct ServoWebViewHandle {
     delegate: Rc<EmbedderDelegate>,
     // Kept alive for as long as the webview lives; the delegate also holds a
     // type-erased clone of the same context.
-    _rendering_context: Rc<SwglRenderingContext>,
+    rendering: Rendering,
+}
+
+/// Which rendering context a handle was built with.
+enum Rendering {
+    /// CPU rasterization; frames reach the host as RGBA buffers.
+    Swgl { _context: Rc<SwglRenderingContext> },
+    /// GPU rendering in the host's GL context; frames are blitted.
+    HostGl(Rc<HostGlRenderingContext>),
 }
 
 static INIT: Once = Once::new();
@@ -376,7 +424,7 @@ fn ensure_initialized() {
         // wins over a freshly built one, so "the fix did not work" and "this
         // is not the fixed binary" look identical. The stamp settles it.
         log::warn!(
-            "libservoshell {} (built {}s since epoch), CPU-only swgl rendering",
+            "libservoshell {} (built {}s since epoch), swgl CPU rendering, or host GL when offered",
             env!("CARGO_PKG_VERSION"),
             env!("SERVO_BUILD_STAMP"),
         );
@@ -540,6 +588,84 @@ pub unsafe extern "C" fn servo_webview_new(
         }
     };
 
+    unsafe {
+        new_handle(
+            rendering_context.clone(),
+            Rendering::Swgl { _context: rendering_context },
+            initial_uri,
+        )
+    }
+}
+
+/// Create a Servo webview that renders on the GPU, inside a GL context owned
+/// by the host -- a `GtkGLArea`'s.
+///
+/// The host's context must exist and `make_current` must make it current
+/// (for a GtkGLArea: `gtk_gl_area_make_current`, returning whether the area
+/// has a context without error). It is called whenever Servo needs GL, from
+/// this thread, including during this call and during [`servo_webview_free`],
+/// so the context must outlive the handle: free it before the GL area is
+/// unrealized.
+///
+/// Frames are announced through [`servo_webview_set_gl_frame_ready_callback`]
+/// and copied out with [`servo_webview_gl_blit`]; the RGBA frame callback is
+/// never invoked for such a handle.
+///
+/// Returns NULL if the context is unusable (no GL library owns it, older than
+/// GL 3.2 / GLES 3.0, ...) -- the host should then fall back to
+/// [`servo_webview_new`], which needs no GL at all -- or if Servo has already
+/// been shut down. The reason is printed to stderr.
+///
+/// # Safety
+/// `initial_uri` must be NULL or a valid NUL-terminated C string. `user_data`
+/// is passed verbatim to `make_current` and must stay valid for the lifetime
+/// of the handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_new_gl(
+    width: u32,
+    height: u32,
+    initial_uri: *const c_char,
+    make_current: Option<ServoGlMakeCurrentCallback>,
+    user_data: *mut c_void,
+) -> *mut ServoWebViewHandle {
+    ensure_initialized();
+
+    let Some(make_current) = make_current else {
+        eprintln!("servo_webview_new_gl: make_current is NULL.");
+        return ptr::null_mut();
+    };
+
+    let size = dpi::PhysicalSize::new(width.max(1), height.max(1));
+    diagnostics::trace(&format!("servo_webview_new_gl: entered, {width}x{height}"));
+
+    let rendering_context = match HostGlRenderingContext::new(size, make_current, user_data) {
+        Ok(context) => Rc::new(context),
+        Err(error) => {
+            eprintln!("servo_webview_new_gl: the host GL context is unusable ({error}).");
+            return ptr::null_mut();
+        }
+    };
+
+    unsafe {
+        new_handle(
+            rendering_context.clone(),
+            Rendering::HostGl(rendering_context),
+            initial_uri,
+        )
+    }
+}
+
+/// The part of [`servo_webview_new`] and [`servo_webview_new_gl`] that does
+/// not depend on the rendering context.
+///
+/// # Safety
+/// `initial_uri` must be NULL or a valid NUL-terminated C string.
+unsafe fn new_handle(
+    rendering_context: Rc<dyn RenderingContext>,
+    rendering: Rendering,
+    initial_uri: *const c_char,
+) -> *mut ServoWebViewHandle {
+    let host_gl = matches!(rendering, Rendering::HostGl(_));
     let initial_url = if initial_uri.is_null() {
         None
     } else {
@@ -559,7 +685,7 @@ pub unsafe extern "C" fn servo_webview_new(
     };
     diagnostics::trace("Servo ready, building WebView");
 
-    let delegate = Rc::new(EmbedderDelegate::new(rendering_context.clone()));
+    let delegate = Rc::new(EmbedderDelegate::new(rendering_context.clone(), host_gl));
     let mut builder = WebViewBuilder::new(&servo, rendering_context.clone())
         .delegate(delegate.clone());
     if let Some(url) = initial_url {
@@ -578,7 +704,7 @@ pub unsafe extern "C" fn servo_webview_new(
         webview,
         servo,
         delegate,
-        _rendering_context: rendering_context,
+        rendering,
     });
     Box::into_raw(handle)
 }
@@ -598,6 +724,52 @@ pub unsafe extern "C" fn servo_webview_free(webview: *mut ServoWebViewHandle) {
     }
     drop(unsafe { Box::from_raw(webview) });
     release_shared_servo();
+}
+
+/// Register the callback invoked once per painted frame on a
+/// [`servo_webview_new_gl`] handle. Pass a NULL `callback` to clear it.
+///
+/// # Safety
+/// `webview` must be a valid handle. `user_data` is stored verbatim and handed
+/// back to the callback; its lifetime is the caller's responsibility.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_set_gl_frame_ready_callback(
+    webview: *mut ServoWebViewHandle,
+    callback: Option<ServoGlFrameReadyCallback>,
+    user_data: *mut c_void,
+) {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return;
+    };
+    *handle.delegate.gl_frame_callback.borrow_mut() =
+        callback.map(|func| GlFrameCallback { func, user_data });
+}
+
+/// Copy the last painted frame of a [`servo_webview_new_gl`] handle into the
+/// framebuffer currently bound for drawing, scaled to `width` x `height`
+/// device pixels. Call it from the GL area's `render` handler, where the
+/// host's context is current and the area's framebuffer is bound.
+///
+/// Returns false, drawing nothing, for a CPU handle.
+///
+/// # Safety
+/// `webview` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_gl_blit(
+    webview: *mut ServoWebViewHandle,
+    width: u32,
+    height: u32,
+) -> bool {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return false;
+    };
+    match &handle.rendering {
+        Rendering::HostGl(context) => {
+            context.blit_to_bound_framebuffer(width, height);
+            true
+        }
+        Rendering::Swgl { .. } => false,
+    }
 }
 
 /// Register the frame sink invoked once per presented frame. Pass a NULL

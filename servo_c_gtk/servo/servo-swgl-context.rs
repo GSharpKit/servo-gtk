@@ -115,7 +115,7 @@ impl RenderingContext for SwglRenderingContext {
 
     fn read_to_image(&self, source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
         self.swgl.make_current();
-        read_framebuffer_to_image(&self.gleam_gl, source_rectangle)
+        read_framebuffer_to_image(&self.gleam_gl, 0, source_rectangle)
     }
 
     fn size(&self) -> PhysicalSize<u32> {
@@ -182,14 +182,20 @@ fn init_default_framebuffer(swgl: &swgl::Context, size: PhysicalSize<u32>) {
     );
 }
 
-/// Read the default framebuffer back into an image.
+/// Read `framebuffer` (0 is the default one) back into an image.
 ///
 /// A copy of `paint_api`'s `Framebuffer::read_framebuffer_to_image`, which is
 /// private to that crate. Kept behaviourally identical so frames coming out of
 /// this context are indistinguishable from the surfman context's, including
 /// the vertical flip: GL's origin is bottom-left and `RgbaImage`'s is top-left.
-fn read_framebuffer_to_image(gl: &Rc<dyn Gl>, source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
-    gl.bind_framebuffer(gl::FRAMEBUFFER, 0);
+/// Shared with the host GL context, which reads its offscreen `framebuffer`
+/// rather than the default one.
+pub(crate) fn read_framebuffer_to_image(
+    gl: &Rc<dyn Gl>,
+    framebuffer: gl::GLuint,
+    source_rectangle: DeviceIntRect,
+) -> Option<RgbaImage> {
+    gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer);
     gl.bind_vertex_array(0);
 
     let mut pixels = gl.read_pixels(
