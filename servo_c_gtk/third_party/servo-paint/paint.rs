@@ -20,9 +20,7 @@ use embedder_traits::{
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
-use log::debug;
-#[cfg(feature = "webgl")]
-use log::warn;
+use log::{debug, warn};
 use paint_api::rendering_context::RenderingContext;
 use paint_api::{
     PaintMessage, PaintProxy, PainterSurfmanDetails, PainterSurfmanDetailsMap,
@@ -272,49 +270,36 @@ impl Paint {
         }
 
         let painter = Painter::new(rendering_context.clone(), self);
-
-        // LOCAL PATCH (servo-gtk): tolerate a `RenderingContext` with no
-        // surfman connection instead of panicking on `.expect()`.
-        //
-        // The connection exists only so the WebGL thread can open surfman
-        // devices. A CPU-only rasterizer (swgl) has no GPU context to give
-        // WebGL anyway, and demanding a connection is what forces libEGL --
-        // and behind it the whole vendor GL stack, gbm, drm, gallium, LLVM --
-        // to be loadable on a machine that is meant to need no GL at all.
-        //
-        // The lookup in the WebGL thread already handles a missing entry:
-        // `servo-webgl-0.6.0/webgl_thread.rs:433` returns
-        // `Err("No PainterSurfmanDetails found ...")`. So skipping the insert
-        // degrades exactly WebGL and nothing else.
-        if let Some(connection) = rendering_context.connection() {
-            let adapter = connection
-                .create_adapter()
-                .expect("Failed to create adapter");
-
-            let painter_surfman_details = PainterSurfmanDetails {
-                connection,
-                adapter,
-            };
-            self.painter_surfman_details_map
-                .insert(painter.painter_id, painter_surfman_details);
-        }
-
         let painter_id = painter.painter_id;
         self.painters.push(Rc::new(RefCell::new(painter)));
+
+        // These are only used to serve WebGL external images, which handles their
+        // absence from the map
+        let Some(connection) = rendering_context.connection() else {
+            warn!("The rendering context has no surfman connection, WebGL will be unavailable");
+            return painter_id;
+        };
+        let Ok(adapter) = connection.create_adapter().inspect_err(|error| {
+            warn!("Could not create a surfman adapter, WebGL will be unavailable: {error:?}")
+        }) else {
+            return painter_id;
+        };
+
+        self.painter_surfman_details_map.insert(
+            painter_id,
+            PainterSurfmanDetails {
+                connection,
+                adapter,
+            },
+        );
+
         painter_id
     }
 
     fn remove_painter(&mut self, painter_id: PainterId) {
         // The shared details map must be removed first in order to avoid the creation of new
         // devices after `clear_painter_resources` is called.
-        //
-        // LOCAL PATCH (servo-gtk): paired with the conditional insert in
-        // `register_rendering_context`. `PainterSurfmanDetailsMap::remove`
-        // asserts the entry existed (`servo-paint-api-0.6.0/lib.rs:560`), so
-        // a context that provided no connection must not try to remove one.
-        if self.painter_surfman_details_map.get(painter_id).is_some() {
-            self.painter_surfman_details_map.remove(painter_id);
-        }
+        self.painter_surfman_details_map.remove(painter_id);
 
         #[cfg(feature = "webgl")]
         if !self
@@ -565,13 +550,21 @@ impl Paint {
                 font_key,
                 size,
                 flags,
+                platform_options,
                 variations,
             ) => {
                 debug_assert!(painter_id == font_key.into());
                 debug_assert!(painter_id == font_instance_key.into());
 
                 if let Some(mut painter) = self.maybe_painter_mut(painter_id) {
-                    painter.add_font_instance(font_instance_key, font_key, size, flags, variations);
+                    painter.add_font_instance(
+                        font_instance_key,
+                        font_key,
+                        size,
+                        flags,
+                        platform_options,
+                        variations,
+                    );
                 }
             },
             PaintMessage::RemoveFonts(painter_id, keys, instance_keys) => {
@@ -600,11 +593,6 @@ impl Paint {
             PaintMessage::ScreenshotReadinessReponse(webview_id, pipelines_and_epochs) => {
                 if let Some(painter) = self.maybe_painter(webview_id.into()) {
                     painter.handle_screenshot_readiness_reply(webview_id, pipelines_and_epochs);
-                }
-            },
-            PaintMessage::SendLCPCandidate(lcp_candidate, webview_id, pipeline_id, epoch) => {
-                if let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) {
-                    painter.append_lcp_candidate(lcp_candidate, webview_id, pipeline_id, epoch);
                 }
             },
         }

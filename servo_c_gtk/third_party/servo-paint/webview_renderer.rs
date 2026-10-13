@@ -182,8 +182,10 @@ impl WebViewRenderer {
             .any(PipelineDetails::animation_callbacks_running)
     }
 
+    /// Whether this [`WebViewRenderer`] is animating. Note that hidden `WebView`s
+    /// are never considered to be animating.
     pub(crate) fn animating(&self) -> bool {
-        self.animating
+        self.animating && !self.hidden()
     }
 
     pub(crate) fn hidden(&self) -> bool {
@@ -194,7 +196,15 @@ impl WebViewRenderer {
     /// value changed or `false` otherwise.
     pub(crate) fn set_hidden(&mut self, new_value: bool) -> bool {
         let old_value = std::mem::replace(&mut self.hidden, new_value);
-        new_value != old_value
+        if new_value == old_value {
+            return false;
+        }
+
+        let _ = self.embedder_to_constellation_sender.send(
+            EmbedderToConstellationMessage::SetWebViewHidden(self.id, new_value),
+        );
+        self.update_animation_state();
+        true
     }
 
     /// Returns the [`PipelineDetails`] for the given [`PipelineId`], creating it if needed.
@@ -207,10 +217,17 @@ impl WebViewRenderer {
             .or_insert_with(PipelineDetails::new)
     }
 
-    pub(crate) fn pipeline_exited(&mut self, pipeline_id: PipelineId, source: PipelineExitSource) {
+    /// Record that `source` has reported `pipeline_id` as exited. Returns `true`
+    /// once every source has done so and the pipeline details have been discarded,
+    /// so that the caller can also drop the pipeline's scene state in WebRender.
+    pub(crate) fn pipeline_exited(
+        &mut self,
+        pipeline_id: PipelineId,
+        source: PipelineExitSource,
+    ) -> bool {
         let pipeline = self.pipelines.entry(pipeline_id);
         let Entry::Occupied(mut pipeline) = pipeline else {
-            return;
+            return false;
         };
 
         pipeline.get_mut().exited.insert(source);
@@ -219,13 +236,14 @@ impl WebViewRenderer {
         // finished processing the pipeline shutdown. This prevents any followup messges
         // from re-adding the pipeline details and creating a zombie.
         if !pipeline.get().exited.is_all() {
-            return;
+            return false;
         }
 
         // Flush the LCP candidates when exiting pipeline.
         pipeline.get_mut().lcp_candidates.clear();
 
         pipeline.remove_entry();
+        true
     }
 
     pub(crate) fn set_frame_tree(&mut self, frame_tree: &SendableFrameTree) {

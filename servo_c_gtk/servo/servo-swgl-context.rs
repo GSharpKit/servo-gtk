@@ -61,12 +61,12 @@ impl SwglRenderingContext {
     /// `swgl` allocates and owns.
     ///
     /// Note what is *not* here: no display connection, no adapter, no device.
-    /// Stock Servo demands a `surfman::Connection` from every rendering
+    /// Servo up to 0.6.0 demanded a `surfman::Connection` from every rendering
     /// context, and on Unix building one initialises an EGL display -- which
     /// drags in libEGL, the vendor GL driver, gbm, drm, gallium and LLVM on a
     /// machine that is supposed to need no GL at all. We do not provide one
-    /// (see [`RenderingContext::connection`]'s default), and the patched
-    /// `servo-paint` in `third_party/` accepts that.
+    /// (see [`RenderingContext::connection`]'s default), and `servo-paint`
+    /// 0.7.0 accepts that: it logs a warning and disables only WebGL.
     pub fn new(size: PhysicalSize<u32>) -> Result<Self, Error> {
         if size.width == 0 || size.height == 0 {
             log::error!("Unable to create SwglRenderingContext with size under 1x1 ({size:?})");

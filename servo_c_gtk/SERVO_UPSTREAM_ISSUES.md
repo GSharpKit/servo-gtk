@@ -272,7 +272,7 @@ With `NDEBUG` defined (how Gecko ships swgl) there is no abort, but nothing
 renders: every picture-cache tile stays as it was, because the clear is
 silently dropped.
 
-**Cause** — `servo-paint-0.6.0/painter.rs:233` builds `WebRenderOptions` with
+**Cause** — `servo-paint-0.7.0/painter.rs:235` builds `WebRenderOptions` with
 `..Default::default()`, and WebRender defaults `clear_caches_with_quads` to
 `true` (`webrender-0.70.0/src/renderer/init.rs:267`). That selects the
 quad-based picture-cache clear in
@@ -323,7 +323,7 @@ first time a CSS gradient is painted, which in practice means "on scroll":
 src/gl.cc:1523: void BindAttribLocation(GLuint, GLuint, char*): Assertion `p.impl' failed.
 ```
 
-**Cause** — `servo-paint-0.6.0/painter.rs:249` sets `enable_dithering: true`.
+**Cause** — `servo-paint-0.7.0/painter.rs:251` sets `enable_dithering: true`.
 WebRender then requests the gradient shader with the `DITHERING` feature
 (`webrender-0.70.0/src/renderer/shade.rs:866-875`):
 

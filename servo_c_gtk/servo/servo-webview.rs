@@ -468,7 +468,9 @@ pub unsafe extern "C" fn servo_webview_new(
     }
     let webview = builder.build();
     diagnostics::trace("WebView built");
-    webview.focus();
+    // Servo 0.7.0 replaced focus()/blur() with set_focused(bool), and a new
+    // WebView already starts with system focus, so this only states intent.
+    webview.set_focused(true);
     webview.show();
     diagnostics::trace("servo_webview_new: complete");
 

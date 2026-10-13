@@ -1,6 +1,6 @@
 [package]
 name = "libservoshell"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 
 [lib]
@@ -9,7 +9,7 @@ name = "libservoshell"
 path = "servo/servo-webview.rs"
 
 [dependencies]
-#servo = { version = "0.6.0", default-features = true, features = ["gstreamer", "media-gstreamer", "servo-media-gstreamer"] }
+#servo = { version = "0.7.0", default-features = true, features = ["gstreamer", "media-gstreamer", "servo-media-gstreamer"] }
 #
 # `webcrypto` and `brotli-compression-stream` are named explicitly because 0.6.0
 # moved them out of `default`: in 0.5.0 `crypto.subtle` and the brotli format of
@@ -23,7 +23,7 @@ path = "servo/servo-webview.rs"
 # section below -- so the thread only ever existed to fail, and leaving the
 # feature off also drops the surfman device it would have opened. `webgpu` and
 # `webxr` were already off by default in 0.5.0 and stay off.
-servo = { version = "0.6.0", default-features = true, features = [
+servo = { version = "0.7.0", default-features = true, features = [
     "webcrypto",
     "brotli-compression-stream",
 ] }
@@ -50,7 +50,6 @@ log = "0.4"
 # existing handler in servo-diagnostics.rs can see. swgl's assert()s and
 # mozalloc_abort both end there.
 libc = "0.2"
-content-security-policy = "=0.8.2"
 #primeorder = "=0.14.0-rc.14"
 
 # ==========================================================================
@@ -92,7 +91,7 @@ swgl = "0.70"
 #     report exactly one version.
 gleam = "0.15"
 glow = "0.17"
-surfman = "0.13"
+surfman = "0.14"
 
 # jemalloc must NOT use the initial-exec TLS model, or the baked engine overflows
 # the static TLS block when the .so is dlopen'd after startup (e.g. .NET P/Invoke /
@@ -164,9 +163,15 @@ strip = "debuginfo"
 # ==========================================================================
 # Local patch: servo-paint
 # ==========================================================================
-# EXPERIMENT -- see third_party/servo-paint/painter.rs. One line changed
-# (`clear_caches_with_quads: false`) so WebRender clears picture-cache tiles
-# with a scissored glClear instead of a quad drawn with GL_ALWAYS, which the
-# swgl CPU rasterizer does not implement.
+# EXPERIMENT -- see the `LOCAL PATCH` comments in
+# third_party/servo-paint/painter.rs. Two `WebRenderOptions` changed for the
+# swgl CPU rasterizer:
+#   * `clear_caches_with_quads: false` so WebRender clears picture-cache tiles
+#     with a scissored glClear instead of a quad drawn with GL_ALWAYS, which
+#     swgl does not implement.
+#   * `enable_dithering: false` because swgl ships no `DITHERING` gradient
+#     shader variant and aborts on the first CSS gradient.
+# The third 0.6.0 patch (tolerating a RenderingContext without a surfman
+# connection) is upstream as of servo-paint 0.7.0 and no longer carried.
 [patch.crates-io]
 servo-paint = { path = "third_party/servo-paint" }

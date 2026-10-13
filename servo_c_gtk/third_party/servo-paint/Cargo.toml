@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88.0"
 name = "servo-paint"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["The Servo Project Developers"]
 build = false
 publish = true
@@ -53,7 +53,7 @@ version = "0.5"
 version = "0.1"
 
 [dependencies.embedder_traits]
-version = "=0.6.0"
+version = "=0.7.0"
 package = "servo-embedder-traits"
 
 [dependencies.euclid]
@@ -79,19 +79,19 @@ default-features = false
 version = "0.4.32"
 
 [dependencies.malloc_size_of]
-version = "=0.6.0"
+version = "=0.7.0"
 package = "servo-malloc-size-of"
 
 [dependencies.media]
-version = "=0.6.0"
+version = "=0.7.0"
 package = "servo-media-thread"
 
 [dependencies.paint_api]
-version = "=0.6.0"
+version = "=0.7.0"
 package = "servo-paint-api"
 
 [dependencies.profile_traits]
-version = "=0.6.0"
+version = "=0.7.0"
 package = "servo-profile-traits"
 
 [dependencies.rayon]
@@ -101,25 +101,25 @@ version = "1"
 version = "2.1.2"
 
 [dependencies.servo-allocator]
-version = "=0.6.0"
+version = "=0.7.0"
 
 [dependencies.servo-base]
-version = "=0.6.0"
+version = "=0.7.0"
 
 [dependencies.servo-canvas-traits]
-version = "=0.6.0"
+version = "=0.7.0"
 
 [dependencies.servo-config]
-version = "=0.6.0"
+version = "=0.7.0"
 
 [dependencies.servo-constellation-traits]
-version = "=0.6.0"
+version = "=0.7.0"
 
 [dependencies.servo-geometry]
-version = "=0.6.0"
+version = "=0.7.0"
 
 [dependencies.servo-tracing]
-version = "=0.6.0"
+version = "=0.7.0"
 
 [dependencies.smallvec]
 version = "1.15"
@@ -129,14 +129,13 @@ features = [
 ]
 
 [dependencies.stylo_traits]
-version = "0.21.0"
+version = "0.22"
 
 [dependencies.surfman]
-version = "0.13.0"
-features = ["chains"]
+version = "0.14.0"
 
 [dependencies.timers]
-version = "=0.6.0"
+version = "=0.7.0"
 package = "servo-timers"
 
 [dependencies.tracing]
@@ -144,13 +143,13 @@ version = "0.1.44"
 optional = true
 
 [dependencies.webgl]
-version = "=0.6.0"
+version = "=0.7.0"
 optional = true
 default-features = false
 package = "servo-webgl"
 
 [dependencies.webgpu]
-version = "=0.6.0"
+version = "=0.7.0"
 optional = true
 package = "servo-webgpu"
 
@@ -162,12 +161,12 @@ features = ["serde"]
 version = "0.70"
 
 [dependencies.webxr]
-version = "=0.6.0"
+version = "=0.7.0"
 optional = true
 package = "servo-webxr"
 
 [dependencies.webxr-api]
-version = "=0.6.0"
+version = "=0.7.0"
 optional = true
 package = "servo-webxr-api"
 
@@ -175,9 +174,17 @@ package = "servo-webxr-api"
 version = "0.2.2"
 
 [dev-dependencies.surfman]
-version = "0.13.0"
-features = ["chains"]
+version = "0.14.0"
 
 [lints.clippy]
-panic = "deny"
-unwrap_used = "deny"
+manual_string_new = "warn"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(crown)",
+    "cfg(coverage)",
+    "cfg(llvm_pgo)",
+    "cfg(ohos_mock)",
+]
