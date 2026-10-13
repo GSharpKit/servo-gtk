@@ -448,6 +448,23 @@ tab_title_for_uri(const gchar *uri)
     return g_strdup(uri);
 }
 
+/*
+ * The page wants to navigate. Returning TRUE stops it; a real browser would
+ * hand a mailto: link to the mail client here instead of loading it.
+ */
+static gboolean
+on_web_view_decide_navigation(ServoGtkWebView *web_view, const gchar *uri, gpointer user_data)
+{
+    DemoTab  *tab = user_data;
+    gboolean  block = g_str_has_prefix(uri, "mailto:");
+
+    (void) web_view;
+
+    g_print("tab %u: navigation to %s %s\n", tab->id, uri, block ? "blocked" : "allowed");
+
+    return block;
+}
+
 /* Page load progress: print it, the way a browser would drive a spinner. */
 static void
 on_web_view_load_changed(ServoGtkWebView *web_view, ServoGtkLoadEvent load_event, gpointer user_data)
@@ -654,6 +671,8 @@ add_tab(DemoWindow *win, const gchar *uri)
     /* Print and reflect URL changes reported by Servo (navigation, redirects). */
     g_signal_connect(web_view, "uri-changed", G_CALLBACK(on_web_view_uri_changed), tab);
     g_signal_connect(web_view, "load-changed", G_CALLBACK(on_web_view_load_changed), tab);
+    g_signal_connect(web_view, "decide-navigation",
+                     G_CALLBACK(on_web_view_decide_navigation), tab);
 
     /*
      * ServoGtkWebView implements GtkScrollable, so putting it in a

@@ -87,6 +87,14 @@ servo_webview_set_load_status_changed_callback(ServoWebViewHandle            *we
     (void) webview; (void) callback; (void) user_data;
 }
 
+void
+servo_webview_set_navigation_request_callback(ServoWebViewHandle            *webview,
+                                              ServoNavigationRequestCallback callback,
+                                              void                          *user_data)
+{
+    (void) webview; (void) callback; (void) user_data;
+}
+
 uint32_t servo_webview_get_load_status(ServoWebViewHandle *webview)
 {
     (void) webview;

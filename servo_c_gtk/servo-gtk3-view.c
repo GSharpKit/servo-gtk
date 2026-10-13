@@ -47,6 +47,7 @@ static GParamSpec *properties[N_PROPERTIES] = { NULL };
 enum {
     URI_CHANGED,
     LOAD_CHANGED,
+    DECIDE_NAVIGATION,
     N_SIGNALS
 };
 
@@ -304,6 +305,22 @@ servo_gtk_web_view_on_load_status_changed(uint32_t status, gpointer user_data)
     servo_gtk_web_view_set_loading(self, event != SERVO_GTK_LOAD_FINISHED);
     g_signal_emit(self, signals[LOAD_CHANGED], 0, event);
     g_object_thaw_notify(G_OBJECT(self));
+}
+
+/*
+ * ServoNavigationRequestCallback: the page wants to navigate. A
+ * "decide-navigation" handler returning TRUE has handled it, so Servo must
+ * not load it.
+ */
+static bool
+servo_gtk_web_view_on_navigation_request(const char *url, gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+    gboolean         handled = FALSE;
+
+    g_signal_emit(self, signals[DECIDE_NAVIGATION], 0, url, &handled);
+
+    return !handled;
 }
 
 /* Pump Servo's event loop once per frame clock tick. */
@@ -821,6 +838,8 @@ servo_gtk_web_view_create_idle(gpointer user_data)
             self->servo, servo_gtk_web_view_on_url_changed, self);
         servo_webview_set_load_status_changed_callback(
             self->servo, servo_gtk_web_view_on_load_status_changed, self);
+        servo_webview_set_navigation_request_callback(
+            self->servo, servo_gtk_web_view_on_navigation_request, self);
         /* A new web view starts out loading its first page, so Servo never
          * reports that STARTED as a change; report it from here. */
         if (servo_webview_get_load_status(self->servo) != SERVO_LOAD_STATUS_COMPLETE) {
@@ -1158,6 +1177,38 @@ servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
             G_TYPE_NONE,
             1,
             SERVO_GTK_TYPE_LOAD_EVENT
+        );
+
+    /**
+     * ServoGtkWebView::decide-navigation:
+     * @self: the #ServoGtkWebView
+     * @uri: where the page wants to navigate
+     *
+     * Emitted before the page navigates: a link is followed, `location` is
+     * assigned or a form is submitted. Return %TRUE to
+     * stop it -- e.g. because the application handles @uri itself -- or
+     * %FALSE to let it load. With no handler every navigation proceeds.
+     *
+     * Not emitted for loads the application starts itself
+     * (servo_gtk_web_view_load_uri()), for history traversal or reload, for
+     * HTTP redirects, for an `<iframe>` loading its `src`, or for
+     * same-document navigations. The decision is
+     * synchronous. Do not destroy the web view from a handler; defer that to
+     * an idle.
+     *
+     * Returns: %TRUE to stop the navigation, %FALSE to allow it
+     */
+    signals[DECIDE_NAVIGATION] =
+        g_signal_new(
+            "decide-navigation",
+            G_TYPE_FROM_CLASS(klass),
+            G_SIGNAL_RUN_LAST,
+            G_STRUCT_OFFSET(ServoGtkWebViewClass, decide_navigation),
+            g_signal_accumulator_true_handled, NULL,
+            NULL,       /* default (generic) C marshaller */
+            G_TYPE_BOOLEAN,
+            1,
+            G_TYPE_STRING
         );
 }
 

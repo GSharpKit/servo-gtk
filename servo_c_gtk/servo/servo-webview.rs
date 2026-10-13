@@ -34,7 +34,7 @@ use servo::{
     Code, ConsoleLogLevel, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, JSValue,
     JavaScriptEvaluationError,
     Key, KeyState, KeyboardEvent, LoadStatus, Location, Modifiers, MouseButton, MouseButtonAction,
-    MouseButtonEvent, MouseMoveEvent, NamedKey, PrefValue, Preferences, RenderingContext, Scroll,
+    MouseButtonEvent, MouseMoveEvent, NamedKey, NavigationRequest, PrefValue, Preferences, RenderingContext, Scroll,
     Servo, ServoBuilder, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
 };
 use url::Url;
@@ -110,6 +110,13 @@ fn load_status_to_c(status: LoadStatus) -> u32 {
     }
 }
 
+/// Asked before the page navigates somewhere -- link, `location` assignment,
+/// form submission. `url` is a NUL-terminated UTF-8
+/// string valid only for the call. Return `true` to let the navigation
+/// proceed, `false` to cancel it.
+pub type ServoNavigationRequestCallback =
+    extern "C" fn(url: *const c_char, user_data: *mut c_void) -> bool;
+
 /// Called for every `console.*` message logged by the page. `level` is a
 /// `SERVO_CONSOLE_*` value and `message` is a NUL-terminated UTF-8 string valid
 /// only for the duration of the call.
@@ -153,6 +160,11 @@ struct LoadStatusCallback {
     user_data: *mut c_void,
 }
 
+struct NavigationCallback {
+    func: ServoNavigationRequestCallback,
+    user_data: *mut c_void,
+}
+
 struct UrlCallback {
     func: ServoUrlChangedCallback,
     user_data: *mut c_void,
@@ -170,6 +182,7 @@ struct EmbedderDelegate {
     cursor_callback: RefCell<Option<CursorCallback>>,
     url_callback: RefCell<Option<UrlCallback>>,
     load_status_callback: RefCell<Option<LoadStatusCallback>>,
+    navigation_callback: RefCell<Option<NavigationCallback>>,
     console_callback: RefCell<Option<ConsoleCallback>>,
 }
 
@@ -183,6 +196,7 @@ impl EmbedderDelegate {
             cursor_callback: RefCell::new(None),
             url_callback: RefCell::new(None),
             load_status_callback: RefCell::new(None),
+            navigation_callback: RefCell::new(None),
             console_callback: RefCell::new(None),
         }
     }
@@ -284,6 +298,29 @@ impl WebViewDelegate for EmbedderDelegate {
         };
         if let Ok(name) = CString::new(cursor_css_name(cursor)) {
             (cb.0)(name.as_ptr(), cb.1);
+        }
+    }
+
+    fn request_navigation(&self, _webview: WebView, request: NavigationRequest) {
+        let Some((func, user_data)) = self
+            .navigation_callback
+            .borrow()
+            .as_ref()
+            .map(|c| (c.func, c.user_data))
+        else {
+            return request.allow();
+        };
+
+        // A parsed URL never holds a NUL (it would be percent-encoded), so
+        // the fallback is unreachable; it allows, as Servo does unasked.
+        let allowed = match CString::new(request.url.as_str()) {
+            Ok(url) => func(url.as_ptr(), user_data),
+            Err(_) => true,
+        };
+        if allowed {
+            request.allow();
+        } else {
+            request.deny();
         }
     }
 
@@ -892,6 +929,32 @@ pub unsafe extern "C" fn servo_webview_set_load_status_changed_callback(
     };
     *handle.delegate.load_status_callback.borrow_mut() =
         callback.map(|func| LoadStatusCallback { func, user_data });
+}
+
+/// Register the navigation-request callback, asked before the page navigates
+/// (link, `location` assignment, form submission). It decides synchronously:
+/// return `true` to allow, `false` to cancel. Navigations the embedder starts
+/// itself ([`servo_webview_load_uri`], reload, history traversal), HTTP
+/// redirects and an `<iframe>` loading its `src` are not asked about. Without a callback every
+/// navigation is allowed.
+///
+/// The callback runs inside [`servo_webview_spin`] and must not free the
+/// handle.
+///
+/// # Safety
+/// `webview` must be a valid handle. `user_data` is stored verbatim and handed
+/// back to the callback; its lifetime is the caller's responsibility.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_set_navigation_request_callback(
+    webview: *mut ServoWebViewHandle,
+    callback: Option<ServoNavigationRequestCallback>,
+    user_data: *mut c_void,
+) {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return;
+    };
+    *handle.delegate.navigation_callback.borrow_mut() =
+        callback.map(|func| NavigationCallback { func, user_data });
 }
 
 /// The current load status, a `SERVO_LOAD_STATUS_*` value. A NULL handle

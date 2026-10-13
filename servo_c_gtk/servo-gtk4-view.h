@@ -97,9 +97,10 @@ struct _ServoGtkWebViewClass {
                          const gchar     *uri);
     void (*load_changed) (ServoGtkWebView   *web_view,
                           ServoGtkLoadEvent  load_event);
+    gboolean (*decide_navigation) (ServoGtkWebView *web_view,
+                                   const gchar     *uri);
 
     /* Padding for future expansion */
-    void (*_gtk_reserved2) (void);
     void (*_gtk_reserved3) (void);
     void (*_gtk_reserved4) (void);
 };

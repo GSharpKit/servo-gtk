@@ -149,6 +149,19 @@ void servo_webview_set_load_status_changed_callback(ServoWebViewHandle          
                                                     ServoLoadStatusChangedCallback callback,
                                                     void                          *user_data);
 
+/*
+ * Asked before the page navigates: link, location assignment or form
+ * submission. Return true to allow, false to cancel. `url` is valid only for
+ * the call. Navigations started through this API (load_uri, reload, history),
+ * HTTP redirects and an <iframe> loading its src are not asked about. Runs inside
+ * servo_webview_spin(); must not free the handle.
+ */
+typedef bool (*ServoNavigationRequestCallback)(const char *url, void *user_data);
+
+void servo_webview_set_navigation_request_callback(ServoWebViewHandle            *webview,
+                                                   ServoNavigationRequestCallback callback,
+                                                   void                          *user_data);
+
 /* The current SERVO_LOAD_STATUS_* value; COMPLETE for a NULL handle. */
 uint32_t servo_webview_get_load_status(ServoWebViewHandle *webview);
 
