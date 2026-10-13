@@ -31,6 +31,13 @@
 //! That is the same constraint the rest of this crate already has: one GTK main
 //! thread owns the webview (see the module docs in `servo-webview.rs`).
 //!
+//! With several webviews there are several of these contexts, and swgl's
+//! "current" context is a single global (`static Context* ctx`, gl.cc). Every
+//! entry point -- `InitDefaultFramebuffer` included, despite being called
+//! through `&self` -- acts on whichever context is current. So each method
+//! below that issues GL makes its own context current first, instead of
+//! relying on Servo's painter to have done it.
+//!
 //! [`SoftwareRenderingContext`]: servo::SoftwareRenderingContext
 
 use std::cell::Cell;
@@ -102,10 +109,12 @@ impl Drop for SwglRenderingContext {
 
 impl RenderingContext for SwglRenderingContext {
     fn prepare_for_rendering(&self) {
+        self.swgl.make_current();
         self.gleam_gl.bind_framebuffer(gl::FRAMEBUFFER, 0);
     }
 
     fn read_to_image(&self, source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
+        self.swgl.make_current();
         read_framebuffer_to_image(&self.gleam_gl, source_rectangle)
     }
 
@@ -124,6 +133,7 @@ impl RenderingContext for SwglRenderingContext {
         }
 
         self.size.set(size);
+        self.swgl.make_current();
         init_default_framebuffer(&self.swgl, size);
     }
 

@@ -20,12 +20,14 @@
 //!    the frame-ready callback fires synchronously from inside this call.
 //! 5. `servo_webview_free()` — destroy the handle.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::env;
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::mem::ManuallyDrop;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use euclid::Point2D;
 use servo::{
@@ -216,10 +218,14 @@ impl WebViewDelegate for EmbedderDelegate {
     }
 }
 
-/// Opaque handle handed to C. Owns the whole Servo instance for one webview.
+/// Opaque handle handed to C. Owns one webview, its delegate and its rendering
+/// context; the Servo instance behind it is shared, see [`shared_servo`].
 pub struct ServoWebViewHandle {
-    servo: Servo,
+    // Declared first so it is dropped first: `WebView`'s drop closes the
+    // webview in the constellation and removes its painter (WebRender and the
+    // swgl context with it) while the shared instance is still alive.
     webview: WebView,
+    servo: Servo,
     delegate: Rc<EmbedderDelegate>,
     // Kept alive for as long as the webview lives; the delegate also holds a
     // type-erased clone of the same context.
@@ -227,6 +233,95 @@ pub struct ServoWebViewHandle {
 }
 
 static INIT: Once = Once::new();
+
+/// Set once the shared Servo instance has been shut down. It is a static, not
+/// a thread-local, because what it guards -- `opts`, SpiderMonkey -- is
+/// process-global.
+static SERVO_SHUT_DOWN: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// The one Servo instance in this process, created by the first
+    /// [`servo_webview_new`] and shared by every handle after it.
+    ///
+    /// A second `ServoBuilder::build()` in the same process cannot work:
+    /// `Servo::new` calls `opts::initialize_options`, which is a `OnceLock`
+    /// that panics with "Already initialized" (servo-config-0.7.0/opts.rs:279),
+    /// and installs the embedder `PipelineNamespace` into a thread-local that
+    /// asserts it is empty (servo-base-0.7.0/id.rs:207). Across our `extern
+    /// "C"` boundary that panic aborts the host -- so one engine per widget
+    /// meant the second tab killed the application. Preferences are
+    /// process-global in Servo as well (`servo_config::prefs::set`).
+    ///
+    /// Servo is built for this: each `WebView` gets its own painter, WebRender
+    /// instance and rendering context, and dropping the last `WebView` of a
+    /// painter tears all of that down (`servo-paint-0.7.0/paint.rs:601`). Only
+    /// the engine core -- constellation, script, network -- is shared.
+    ///
+    /// The instance is shut down when the last handle is freed (see
+    /// [`release_shared_servo`]), and it must be: `ServoInner` owns the
+    /// `JSEngineSetup` whose drop is `JS_ShutDown`. Left running, SpiderMonkey
+    /// is still alive when `exit()` runs its C++ static destructors, and
+    /// `~MutexImpl` finds a mutex its helper threads hold, gets EBUSY from
+    /// `pthread_mutex_destroy` and aborts -- the application crashes on quit.
+    ///
+    /// `ManuallyDrop` so that this thread-local has no destructor of its own:
+    /// `ServoInner::drop` spins the event loop until the constellation exits,
+    /// which must happen from `servo_webview_free`, never from thread-local
+    /// teardown while the process is already exiting (on Windows that is
+    /// under the loader lock).
+    static SHARED_SERVO: RefCell<Option<ManuallyDrop<Servo>>> = const { RefCell::new(None) };
+
+    /// Handles currently alive, i.e. users of [`SHARED_SERVO`].
+    static LIVE_HANDLES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The process-wide Servo instance, built on first use. See [`SHARED_SERVO`].
+///
+/// Returns `None` once it has been shut down: neither Servo's options nor
+/// SpiderMonkey can be initialised a second time in one process, so after the
+/// last webview is gone no new one can be made. Failing here, rather than
+/// letting `ServoBuilder::build()` panic across the FFI boundary, keeps the
+/// host alive.
+fn shared_servo() -> Option<Servo> {
+    if SERVO_SHUT_DOWN.load(Ordering::Acquire) {
+        return None;
+    }
+    SHARED_SERVO.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let servo = cell.get_or_insert_with(|| {
+            diagnostics::trace("building the shared Servo instance");
+            let servo = ServoBuilder::default()
+                .preferences(experimental_preferences())
+                .build();
+            diagnostics::trace("shared Servo instance built");
+            ManuallyDrop::new(servo)
+        });
+        Some(Servo::clone(servo))
+    })
+}
+
+/// Drop one handle's claim on the shared instance, and shut Servo down if it
+/// was the last. Call after the handle (and its `WebView`) has been dropped.
+fn release_shared_servo() {
+    let remaining = LIVE_HANDLES.with(|count| {
+        let remaining = count.get().saturating_sub(1);
+        count.set(remaining);
+        remaining
+    });
+    if remaining > 0 {
+        return;
+    }
+
+    // Take it out before dropping: `ServoInner::drop` spins the event loop,
+    // and nothing may hold the RefCell while it does.
+    let servo = SHARED_SERVO.with(|cell| cell.borrow_mut().take());
+    if let Some(servo) = servo {
+        SERVO_SHUT_DOWN.store(true, Ordering::Release);
+        diagnostics::trace("last webview freed, shutting the shared Servo instance down");
+        drop(ManuallyDrop::into_inner(servo));
+        diagnostics::trace("shared Servo instance shut down");
+    }
+}
 
 /// One-time, process-global initialisation of the TLS crypto provider. Safe to
 /// call repeatedly; only the first call has effect.
@@ -454,11 +549,15 @@ pub unsafe extern "C" fn servo_webview_new(
             .and_then(|s| Url::parse(s).ok())
     };
 
-    diagnostics::trace("rendering context ready, building Servo");
-    let servo = ServoBuilder::default()
-        .preferences(experimental_preferences())
-        .build();
-    diagnostics::trace("Servo built, building WebView");
+    diagnostics::trace("rendering context ready, getting Servo");
+    let Some(servo) = shared_servo() else {
+        eprintln!(
+            "servo_webview_new: Servo has already been shut down in this process \
+             (the last webview was freed); it cannot be started again."
+        );
+        return ptr::null_mut();
+    };
+    diagnostics::trace("Servo ready, building WebView");
 
     let delegate = Rc::new(EmbedderDelegate::new(rendering_context.clone()));
     let mut builder = WebViewBuilder::new(&servo, rendering_context.clone())
@@ -474,9 +573,10 @@ pub unsafe extern "C" fn servo_webview_new(
     webview.show();
     diagnostics::trace("servo_webview_new: complete");
 
+    LIVE_HANDLES.with(|count| count.set(count.get() + 1));
     let handle = Box::new(ServoWebViewHandle {
-        servo,
         webview,
+        servo,
         delegate,
         _rendering_context: rendering_context,
     });
@@ -484,6 +584,9 @@ pub unsafe extern "C" fn servo_webview_new(
 }
 
 /// Destroy a webview handle. Passing NULL is a no-op.
+///
+/// Freeing the last handle shuts the process-wide Servo instance down (see
+/// `SHARED_SERVO`); after that, [`servo_webview_new`] returns NULL.
 ///
 /// # Safety
 /// `webview` must be NULL or a pointer from [`servo_webview_new`] that has not
@@ -494,6 +597,7 @@ pub unsafe extern "C" fn servo_webview_free(webview: *mut ServoWebViewHandle) {
         return;
     }
     drop(unsafe { Box::from_raw(webview) });
+    release_shared_servo();
 }
 
 /// Register the frame sink invoked once per presented frame. Pass a NULL
