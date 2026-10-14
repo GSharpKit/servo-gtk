@@ -51,7 +51,10 @@ use embedder_traits::{
 use encoding_rs::Encoding;
 use fonts::{FontContext, SystemFontServiceProxy, WebFontLoadEvent};
 use headers::{HeaderMapExt, LastModified, ReferrerPolicy as ReferrerPolicyHeader};
-use http::header::REFRESH;
+use http::header::{
+    CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_LOCATION, CONTENT_TYPE, REFRESH,
+};
+use http::{Method, StatusCode};
 use hyper_serde::Serde;
 use js::context::{JSContext, NoGC};
 use js::glue::GetWindowProxyClass;
@@ -4266,6 +4269,32 @@ impl ScriptThread {
         // Update the `url_list` of the incomplete load to track all redirects. This will be reflected
         // in the new `RequestBuilder` as well.
         incomplete_load.url_list.push(metadata.final_url.clone());
+
+        // LOCAL PATCH (servo/servo#47238): every redirect hop rebuilds its request from
+        // `load_data`, so a POST that net turned into a GET on an earlier hop comes back as
+        // a POST. A later 307/308 then re-sends a body whose stream net already closed, and
+        // the load ends on the "Servo crashed!" page. Apply step 12 of
+        // <https://fetch.spec.whatwg.org/#concept-http-redirect-fetch> here as well, so the
+        // conversion sticks for the rest of the redirect chain.
+        let load_data = &mut incomplete_load.load_data;
+        if metadata.status.try_code().is_some_and(|code| {
+            ((code == StatusCode::MOVED_PERMANENTLY || code == StatusCode::FOUND) &&
+                load_data.method == Method::POST) ||
+                (code == StatusCode::SEE_OTHER &&
+                    load_data.method != Method::GET &&
+                    load_data.method != Method::HEAD)
+        }) {
+            load_data.method = Method::GET;
+            load_data.data = None;
+            for name in [
+                CONTENT_ENCODING,
+                CONTENT_LANGUAGE,
+                CONTENT_LOCATION,
+                CONTENT_TYPE,
+            ] {
+                load_data.headers.remove(name);
+            }
+        }
 
         let mut request_builder = incomplete_load.request_builder();
         request_builder.referrer = metadata

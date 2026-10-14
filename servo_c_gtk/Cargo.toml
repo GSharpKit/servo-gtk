@@ -184,3 +184,10 @@ strip = "debuginfo"
 # connection) is upstream as of servo-paint 0.7.0 and no longer carried.
 [patch.crates-io]
 servo-paint = { path = "third_party/servo-paint" }
+# LOCAL PATCH -- see the `LOCAL PATCH` comment in
+# third_party/servo-script/event_loop/script_thread.rs (servo/servo#47238).
+# A navigation POST answered with 301/302/303 is turned into a GET by net, but
+# script rebuilt every later redirect hop from the original POST `LoadData`, so
+# a 307 further down the chain re-sent an already-closed body and showed the
+# "Servo crashed!" page (e.g. borger.dk -> NemLog-in).
+servo-script = { path = "third_party/servo-script" }
