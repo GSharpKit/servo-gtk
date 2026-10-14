@@ -68,6 +68,43 @@ typedef enum {
 #define SERVO_GTK_TYPE_LOAD_EVENT (servo_gtk_load_event_get_type ())
 GType servo_gtk_load_event_get_type (void) G_GNUC_CONST;
 
+/**
+ * ServoGtkContextMenuFlags:
+ * @SERVO_GTK_CONTEXT_MENU_NONE: nothing in particular was under the pointer
+ * @SERVO_GTK_CONTEXT_MENU_LINK: a link; its URI is passed along
+ * @SERVO_GTK_CONTEXT_MENU_IMAGE: an image; its URI is passed along
+ * @SERVO_GTK_CONTEXT_MENU_EDITABLE_TEXT: editable text, e.g. an input field
+ * @SERVO_GTK_CONTEXT_MENU_SELECTION: the click was on selected text
+ *
+ * What a #ServoGtkWebView::context-menu was opened on. A link around an image
+ * sets both @SERVO_GTK_CONTEXT_MENU_LINK and @SERVO_GTK_CONTEXT_MENU_IMAGE.
+ */
+typedef enum { /*< flags >*/
+    SERVO_GTK_CONTEXT_MENU_NONE          = 0,
+    SERVO_GTK_CONTEXT_MENU_LINK          = 1 << 0,
+    SERVO_GTK_CONTEXT_MENU_IMAGE         = 1 << 1,
+    SERVO_GTK_CONTEXT_MENU_EDITABLE_TEXT = 1 << 2,
+    SERVO_GTK_CONTEXT_MENU_SELECTION     = 1 << 3
+} ServoGtkContextMenuFlags;
+
+#define SERVO_GTK_TYPE_CONTEXT_MENU_FLAGS (servo_gtk_context_menu_flags_get_type ())
+GType servo_gtk_context_menu_flags_get_type (void) G_GNUC_CONST;
+
+/*
+ * Detailed action names of the entries the engine puts in a context menu,
+ * for servo_gtk_context_menu_remove() or to put one back in another place.
+ * Each is enabled only when it applies (Copy only with a selection, ...).
+ */
+#define SERVO_GTK_CONTEXT_MENU_ACTION_GO_BACK         "context-menu.go-back"
+#define SERVO_GTK_CONTEXT_MENU_ACTION_GO_FORWARD      "context-menu.go-forward"
+#define SERVO_GTK_CONTEXT_MENU_ACTION_RELOAD          "context-menu.reload"
+#define SERVO_GTK_CONTEXT_MENU_ACTION_COPY_LINK       "context-menu.copy-link"
+#define SERVO_GTK_CONTEXT_MENU_ACTION_COPY_IMAGE_LINK "context-menu.copy-image-link"
+#define SERVO_GTK_CONTEXT_MENU_ACTION_CUT             "context-menu.cut"
+#define SERVO_GTK_CONTEXT_MENU_ACTION_COPY            "context-menu.copy"
+#define SERVO_GTK_CONTEXT_MENU_ACTION_PASTE           "context-menu.paste"
+#define SERVO_GTK_CONTEXT_MENU_ACTION_SELECT_ALL      "context-menu.select-all"
+
 typedef struct _ServoGtkWebView              ServoGtkWebView;
 typedef struct _ServoGtkWebViewPrivate       ServoGtkWebViewPrivate;
 typedef struct _ServoGtkWebViewClass         ServoGtkWebViewClass;
@@ -99,9 +136,13 @@ struct _ServoGtkWebViewClass {
                           ServoGtkLoadEvent  load_event);
     gboolean (*decide_navigation) (ServoGtkWebView *web_view,
                                    const gchar     *uri);
+    gboolean (*context_menu) (ServoGtkWebView          *web_view,
+                              GMenu                    *menu,
+                              ServoGtkContextMenuFlags  flags,
+                              const gchar              *link_uri,
+                              const gchar              *image_uri);
 
     /* Padding for future expansion */
-    void (*_gtk_reserved3) (void);
     void (*_gtk_reserved4) (void);
 };
 
@@ -144,6 +185,18 @@ const gchar *servo_gtk_web_view_get_uri(ServoGtkWebView *self);
  * Returns: %TRUE while a page is loading
  */
 gboolean servo_gtk_web_view_is_loading(ServoGtkWebView *self);
+
+/**
+ * servo_gtk_context_menu_remove:
+ * @menu: the menu passed to #ServoGtkWebView::context-menu
+ * @action: a detailed action name, e.g. %SERVO_GTK_CONTEXT_MENU_ACTION_COPY
+ *
+ * Removes every entry that activates @action from @menu, looking into its
+ * sections too; a section left empty is removed with it.
+ *
+ * Returns: %TRUE if anything was removed
+ */
+gboolean servo_gtk_context_menu_remove(GMenu *menu, const gchar *action);
 
 /**
  * ServoGtkScriptResultCallback:

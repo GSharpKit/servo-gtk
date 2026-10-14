@@ -23,6 +23,7 @@
 #define SERVO_WEBVIEW_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -161,6 +162,80 @@ typedef bool (*ServoNavigationRequestCallback)(const char *url, void *user_data)
 void servo_webview_set_navigation_request_callback(ServoWebViewHandle            *webview,
                                                    ServoNavigationRequestCallback callback,
                                                    void                          *user_data);
+
+/*
+ * Context menu. On a right click the page builds the menu itself -- entries,
+ * which are enabled (Copy only with a selection), what was under the pointer
+ * -- and hands it over as an opaque ServoContextMenu. The host owns it until
+ * it calls exactly one of servo_context_menu_select() or
+ * servo_context_menu_dismiss(); that may happen later, from the main loop.
+ * Choosing an entry runs it inside Servo (Copy reaches the system clipboard).
+ */
+typedef struct ServoContextMenu ServoContextMenu;
+
+/* What was under the pointer; servo_context_menu_get_flags(). */
+enum {
+    SERVO_CONTEXT_MENU_LINK          = 1 << 0,
+    SERVO_CONTEXT_MENU_IMAGE         = 1 << 1,
+    SERVO_CONTEXT_MENU_EDITABLE_TEXT = 1 << 2,
+    SERVO_CONTEXT_MENU_SELECTION     = 1 << 3
+};
+
+/* Item actions; servo_context_menu_item_action(). Part of the ABI. */
+enum {
+    SERVO_CONTEXT_MENU_ACTION_GO_BACK                   = 0,
+    SERVO_CONTEXT_MENU_ACTION_GO_FORWARD                = 1,
+    SERVO_CONTEXT_MENU_ACTION_RELOAD                    = 2,
+    SERVO_CONTEXT_MENU_ACTION_COPY_LINK                 = 3,
+    SERVO_CONTEXT_MENU_ACTION_OPEN_LINK_IN_NEW_WEB_VIEW = 4,
+    SERVO_CONTEXT_MENU_ACTION_COPY_IMAGE_LINK           = 5,
+    SERVO_CONTEXT_MENU_ACTION_OPEN_IMAGE_IN_NEW_VIEW    = 6,
+    SERVO_CONTEXT_MENU_ACTION_CUT                       = 7,
+    SERVO_CONTEXT_MENU_ACTION_COPY                      = 8,
+    SERVO_CONTEXT_MENU_ACTION_PASTE                     = 9,
+    SERVO_CONTEXT_MENU_ACTION_SELECT_ALL                = 10
+};
+#define SERVO_CONTEXT_MENU_SEPARATOR UINT32_MAX
+
+/*
+ * Show `menu`. x, y, width, height (device pixels) are the area of the
+ * clicked element, not the pointer position.
+ */
+typedef void (*ServoContextMenuCallback)(ServoContextMenu *menu,
+                                         int32_t           x,
+                                         int32_t           y,
+                                         int32_t           width,
+                                         int32_t           height,
+                                         void             *user_data);
+
+/* Servo withdrew the last menu (e.g. the page navigated): close it. It must
+ * still be finished; doing so then has no effect. */
+typedef void (*ServoContextMenuHiddenCallback)(void *user_data);
+
+/* `hide` may be NULL. With no `show` callback menus are dismissed unseen. */
+void servo_webview_set_context_menu_callback(ServoWebViewHandle            *webview,
+                                             ServoContextMenuCallback       show,
+                                             ServoContextMenuHiddenCallback hide,
+                                             void                          *user_data);
+
+/* SERVO_CONTEXT_MENU_* flags for what was under the pointer. */
+uint32_t servo_context_menu_get_flags(const ServoContextMenu *menu);
+/* The link / image under the pointer, or NULL; valid until the menu is finished. */
+const char *servo_context_menu_get_link_url(const ServoContextMenu *menu);
+const char *servo_context_menu_get_image_url(const ServoContextMenu *menu);
+
+/* Items, separators included. The action is SERVO_CONTEXT_MENU_SEPARATOR for
+ * a separator; the label (Servo's English text, e.g. "Copy") is then NULL and
+ * otherwise valid until the menu is finished. */
+size_t      servo_context_menu_get_n_items(const ServoContextMenu *menu);
+uint32_t    servo_context_menu_item_action(const ServoContextMenu *menu, size_t index);
+const char *servo_context_menu_item_label(const ServoContextMenu *menu, size_t index);
+bool        servo_context_menu_item_enabled(const ServoContextMenu *menu, size_t index);
+
+/* Finish the menu: run `action` (an unknown one dismisses), or choose nothing.
+ * Either frees `menu`. */
+void servo_context_menu_select(ServoContextMenu *menu, uint32_t action);
+void servo_context_menu_dismiss(ServoContextMenu *menu);
 
 /* The current SERVO_LOAD_STATUS_* value; COMPLETE for a NULL handle. */
 uint32_t servo_webview_get_load_status(ServoWebViewHandle *webview);

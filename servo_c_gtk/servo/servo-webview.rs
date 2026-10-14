@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use euclid::Point2D;
 use servo::{
-    Code, ConsoleLogLevel, Cursor, DeviceIntRect, DeviceVector2D, InputEvent, JSValue,
+    Code, ConsoleLogLevel, Cursor, DeviceIntRect, EmbedderControl, EmbedderControlId, DeviceVector2D, InputEvent, JSValue,
     JavaScriptEvaluationError,
     Key, KeyState, KeyboardEvent, LoadStatus, Location, Modifiers, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseMoveEvent, NamedKey, NavigationRequest, PrefValue, Preferences, RenderingContext, Scroll,
@@ -64,6 +64,12 @@ use swgl_context::SwglRenderingContext;
 mod host_gl_context;
 
 use host_gl_context::{HostGlRenderingContext, ServoGlMakeCurrentCallback};
+
+/// The right-click menu Servo builds, handed to C as an opaque handle.
+#[path = "servo-context-menu.rs"]
+mod context_menu;
+
+use context_menu::ServoContextMenu;
 
 /// Called once per rendered frame with a tightly-packed RGBA8 buffer.
 ///
@@ -117,6 +123,24 @@ fn load_status_to_c(status: LoadStatus) -> u32 {
 pub type ServoNavigationRequestCallback =
     extern "C" fn(url: *const c_char, user_data: *mut c_void) -> bool;
 
+/// Called when the page wants a context menu shown. The host owns `menu` and
+/// must finish it with exactly one of `servo_context_menu_select` or
+/// `servo_context_menu_dismiss`, now or later. `x`, `y`, `width`, `height`
+/// (device pixels) are the area of the element that was clicked.
+pub type ServoContextMenuCallback = extern "C" fn(
+    menu: *mut ServoContextMenu,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    user_data: *mut c_void,
+);
+
+/// Called when Servo withdraws the context menu it last asked for (e.g. the
+/// page navigated). The host should close it; finishing the menu afterwards is
+/// still required and simply has no effect.
+pub type ServoContextMenuHiddenCallback = extern "C" fn(user_data: *mut c_void);
+
 /// Called for every `console.*` message logged by the page. `level` is a
 /// `SERVO_CONSOLE_*` value and `message` is a NUL-terminated UTF-8 string valid
 /// only for the duration of the call.
@@ -165,6 +189,12 @@ struct NavigationCallback {
     user_data: *mut c_void,
 }
 
+struct ContextMenuCallbacks {
+    show: ServoContextMenuCallback,
+    hide: Option<ServoContextMenuHiddenCallback>,
+    user_data: *mut c_void,
+}
+
 struct UrlCallback {
     func: ServoUrlChangedCallback,
     user_data: *mut c_void,
@@ -183,6 +213,10 @@ struct EmbedderDelegate {
     url_callback: RefCell<Option<UrlCallback>>,
     load_status_callback: RefCell<Option<LoadStatusCallback>>,
     navigation_callback: RefCell<Option<NavigationCallback>>,
+    context_menu_callbacks: RefCell<Option<ContextMenuCallbacks>>,
+    /// The context menu last handed to C, so a matching
+    /// `hide_embedder_control` can be passed on.
+    context_menu_id: Cell<Option<EmbedderControlId>>,
     console_callback: RefCell<Option<ConsoleCallback>>,
 }
 
@@ -197,6 +231,8 @@ impl EmbedderDelegate {
             url_callback: RefCell::new(None),
             load_status_callback: RefCell::new(None),
             navigation_callback: RefCell::new(None),
+            context_menu_callbacks: RefCell::new(None),
+            context_menu_id: Cell::new(None),
             console_callback: RefCell::new(None),
         }
     }
@@ -298,6 +334,50 @@ impl WebViewDelegate for EmbedderDelegate {
         };
         if let Ok(name) = CString::new(cursor_css_name(cursor)) {
             (cb.0)(name.as_ptr(), cb.1);
+        }
+    }
+
+    fn show_embedder_control(&self, _webview: WebView, control: EmbedderControl) {
+        // Only the context menu is handled. Every other control (select
+        // popups, colour pickers, dialogs) is dropped, which answers it with
+        // Servo's default -- as before.
+        let EmbedderControl::ContextMenu(menu) = control else {
+            return;
+        };
+        let Some((show, user_data)) = self
+            .context_menu_callbacks
+            .borrow()
+            .as_ref()
+            .map(|c| (c.show, c.user_data))
+        else {
+            return menu.dismiss();
+        };
+
+        let area = menu.position();
+        self.context_menu_id.set(Some(menu.id()));
+        let menu = Box::into_raw(Box::new(ServoContextMenu::new(menu)));
+        show(
+            menu,
+            area.min.x,
+            area.min.y,
+            area.width(),
+            area.height(),
+            user_data,
+        );
+    }
+
+    fn hide_embedder_control(&self, _webview: WebView, control_id: EmbedderControlId) {
+        if self.context_menu_id.get() != Some(control_id) {
+            return;
+        }
+        self.context_menu_id.set(None);
+        let hide = self
+            .context_menu_callbacks
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.hide.map(|hide| (hide, c.user_data)));
+        if let Some((hide, user_data)) = hide {
+            hide(user_data);
         }
     }
 
@@ -955,6 +1035,31 @@ pub unsafe extern "C" fn servo_webview_set_navigation_request_callback(
     };
     *handle.delegate.navigation_callback.borrow_mut() =
         callback.map(|func| NavigationCallback { func, user_data });
+}
+
+/// Register the context-menu callbacks. `show` receives each menu the page
+/// asks for (on a right click); `hide`, which may be NULL, is told when Servo
+/// withdraws it. With no `show` callback menus are dismissed unseen.
+///
+/// # Safety
+/// `webview` must be a valid handle. `user_data` is stored verbatim and handed
+/// back to the callbacks; its lifetime is the caller's responsibility.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_set_context_menu_callback(
+    webview: *mut ServoWebViewHandle,
+    show: Option<ServoContextMenuCallback>,
+    hide: Option<ServoContextMenuHiddenCallback>,
+    user_data: *mut c_void,
+) {
+    let Some(handle) = (unsafe { as_handle(webview) }) else {
+        return;
+    };
+    *handle.delegate.context_menu_callbacks.borrow_mut() =
+        show.map(|show| ContextMenuCallbacks {
+            show,
+            hide,
+            user_data,
+        });
 }
 
 /// The current load status, a `SERVO_LOAD_STATUS_*` value. A NULL handle

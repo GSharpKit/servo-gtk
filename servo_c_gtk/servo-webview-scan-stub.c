@@ -95,6 +95,41 @@ servo_webview_set_navigation_request_callback(ServoWebViewHandle            *web
     (void) webview; (void) callback; (void) user_data;
 }
 
+void
+servo_webview_set_context_menu_callback(ServoWebViewHandle            *webview,
+                                        ServoContextMenuCallback       show,
+                                        ServoContextMenuHiddenCallback hide,
+                                        void                          *user_data)
+{
+    (void) webview; (void) show; (void) hide; (void) user_data;
+}
+
+uint32_t servo_context_menu_get_flags(const ServoContextMenu *menu) { (void) menu; return 0; }
+const char *servo_context_menu_get_link_url(const ServoContextMenu *menu) { (void) menu; return NULL; }
+const char *servo_context_menu_get_image_url(const ServoContextMenu *menu) { (void) menu; return NULL; }
+size_t servo_context_menu_get_n_items(const ServoContextMenu *menu) { (void) menu; return 0; }
+
+uint32_t servo_context_menu_item_action(const ServoContextMenu *menu, size_t index)
+{
+    (void) menu; (void) index;
+    return SERVO_CONTEXT_MENU_SEPARATOR;
+}
+
+const char *servo_context_menu_item_label(const ServoContextMenu *menu, size_t index)
+{
+    (void) menu; (void) index;
+    return NULL;
+}
+
+bool servo_context_menu_item_enabled(const ServoContextMenu *menu, size_t index)
+{
+    (void) menu; (void) index;
+    return false;
+}
+
+void servo_context_menu_select(ServoContextMenu *menu, uint32_t action) { (void) menu; (void) action; }
+void servo_context_menu_dismiss(ServoContextMenu *menu) { (void) menu; }
+
 uint32_t servo_webview_get_load_status(ServoWebViewHandle *webview)
 {
     (void) webview;

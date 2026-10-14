@@ -48,6 +48,7 @@ enum {
     URI_CHANGED,
     LOAD_CHANGED,
     DECIDE_NAVIGATION,
+    CONTEXT_MENU,
     N_SIGNALS
 };
 
@@ -90,6 +91,12 @@ struct _ServoGtkWebViewPrivate {
     gint           gl_height;
     /* A switch from the GL area to the drawing area is queued. */
     guint          fallback_id;
+    /* The context menu Servo asked for, until it is answered. */
+    ServoContextMenu   *context_menu;
+    GtkWidget          *context_popover;
+    GSimpleActionGroup *context_actions;
+    /* The popover closed; answer and destroy it from an idle. */
+    guint               context_closed_id;
 };
 
 G_DEFINE_TYPE_WITH_CODE(ServoGtkWebView, servo_gtk_web_view, GTK_TYPE_WIDGET,
@@ -284,6 +291,239 @@ servo_gtk_web_view_on_navigation_request(const char *url, gpointer user_data)
     g_signal_emit(self, signals[DECIDE_NAVIGATION], 0, url, &handled);
 
     return !handled;
+}
+
+/*
+ * Context menu entries, indexed by SERVO_CONTEXT_MENU_ACTION_*, as GAction
+ * names in the "context-menu" group. NULL: not offered, because opening a
+ * link or image in a new view needs a web view this widget cannot create.
+ */
+static const gchar *const servo_gtk_context_actions[] = {
+    [SERVO_CONTEXT_MENU_ACTION_GO_BACK]                   = "go-back",
+    [SERVO_CONTEXT_MENU_ACTION_GO_FORWARD]                = "go-forward",
+    [SERVO_CONTEXT_MENU_ACTION_RELOAD]                    = "reload",
+    [SERVO_CONTEXT_MENU_ACTION_COPY_LINK]                 = "copy-link",
+    [SERVO_CONTEXT_MENU_ACTION_OPEN_LINK_IN_NEW_WEB_VIEW] = NULL,
+    [SERVO_CONTEXT_MENU_ACTION_COPY_IMAGE_LINK]           = "copy-image-link",
+    [SERVO_CONTEXT_MENU_ACTION_OPEN_IMAGE_IN_NEW_VIEW]    = NULL,
+    [SERVO_CONTEXT_MENU_ACTION_CUT]                       = "cut",
+    [SERVO_CONTEXT_MENU_ACTION_COPY]                      = "copy",
+    [SERVO_CONTEXT_MENU_ACTION_PASTE]                     = "paste",
+    [SERVO_CONTEXT_MENU_ACTION_SELECT_ALL]                = "select-all",
+};
+
+/* Whether `action` is one this widget shows. */
+static gboolean
+servo_gtk_web_view_offers_action(guint32 action)
+{
+    return action < G_N_ELEMENTS(servo_gtk_context_actions) &&
+           servo_gtk_context_actions[action] != NULL;
+}
+
+/* Answer the pending context menu with nothing chosen, if there is one. */
+static void
+servo_gtk_web_view_dismiss_context_menu(ServoGtkWebView *self)
+{
+    if (self->priv->context_menu != NULL) {
+        servo_context_menu_dismiss(self->priv->context_menu);
+        self->priv->context_menu = NULL;
+    }
+}
+
+/*
+ * "context-menu.*" action: the user chose one of Servo's entries. GTK may
+ * report the menu closed before or after this, which is why closing only
+ * answers the menu later, from an idle.
+ */
+static void
+servo_gtk_web_view_on_context_action(GSimpleAction *action,
+                                     GVariant      *parameter,
+                                     gpointer       user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+    const gchar     *name = g_action_get_name(G_ACTION(action));
+
+    (void) parameter;
+
+    if (self->priv->context_menu == NULL) {
+        return;
+    }
+
+    for (guint32 i = 0; i < G_N_ELEMENTS(servo_gtk_context_actions); i++) {
+        if (g_strcmp0(servo_gtk_context_actions[i], name) == 0) {
+            servo_context_menu_select(self->priv->context_menu, i);
+            self->priv->context_menu = NULL;
+            return;
+        }
+    }
+}
+
+/* Take the popover down for good. */
+static void
+servo_gtk_web_view_destroy_context_popover(ServoGtkWebView *self)
+{
+    if (self->priv->context_closed_id != 0) {
+        g_source_remove(self->priv->context_closed_id);
+        self->priv->context_closed_id = 0;
+    }
+    g_clear_pointer(&self->priv->context_popover, gtk_widget_unparent);
+}
+
+static gboolean
+servo_gtk_web_view_context_closed_idle(gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    self->priv->context_closed_id = 0;
+    servo_gtk_web_view_dismiss_context_menu(self);
+    servo_gtk_web_view_destroy_context_popover(self);
+
+    return G_SOURCE_REMOVE;
+}
+
+static void
+servo_gtk_web_view_on_context_popover_closed(GtkPopover *popover, gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    (void) popover;
+
+    if (self->priv->context_closed_id == 0) {
+        self->priv->context_closed_id =
+            g_idle_add(servo_gtk_web_view_context_closed_idle, self);
+    }
+}
+
+/*
+ * Turn Servo's menu into a GMenu of "context-menu.*" actions, enabling each
+ * action as Servo says. Servo's separators become sections.
+ */
+static GMenu *
+servo_gtk_web_view_build_context_model(ServoGtkWebView *self, ServoContextMenu *menu)
+{
+    GMenu  *model = g_menu_new();
+    GMenu  *section = NULL;
+    size_t  n_items = servo_context_menu_get_n_items(menu);
+
+    for (size_t i = 0; i < n_items; i++) {
+        guint32      action = servo_context_menu_item_action(menu, i);
+        const gchar *label = servo_context_menu_item_label(menu, i);
+
+        if (action == SERVO_CONTEXT_MENU_SEPARATOR) {
+            if (section != NULL) {
+                g_menu_append_section(model, NULL, G_MENU_MODEL(section));
+                g_clear_object(&section);
+            }
+            continue;
+        }
+        if (!servo_gtk_web_view_offers_action(action) || label == NULL) {
+            continue;
+        }
+
+        g_simple_action_set_enabled(
+            G_SIMPLE_ACTION(g_action_map_lookup_action(G_ACTION_MAP(self->priv->context_actions),
+                                                       servo_gtk_context_actions[action])),
+            servo_context_menu_item_enabled(menu, i));
+
+        gchar *detailed = g_strconcat("context-menu.", servo_gtk_context_actions[action], NULL);
+        if (section == NULL) {
+            section = g_menu_new();
+        }
+        g_menu_append(section, label, detailed);
+        g_free(detailed);
+    }
+    if (section != NULL) {
+        g_menu_append_section(model, NULL, G_MENU_MODEL(section));
+        g_object_unref(section);
+    }
+
+    return model;
+}
+
+/*
+ * Let the application edit the menu: emit "context-menu". Returns FALSE when
+ * nothing is to be shown -- a handler took over, or the menu ended up empty --
+ * in which case Servo's menu has been answered already.
+ */
+static gboolean
+servo_gtk_web_view_offer_context_menu(ServoGtkWebView *self,
+                                      ServoContextMenu *menu,
+                                      GMenu            *model)
+{
+    gboolean handled = FALSE;
+
+    /* The FFI flag bits are the public ones. */
+    g_signal_emit(self, signals[CONTEXT_MENU], 0, model,
+                  (ServoGtkContextMenuFlags) servo_context_menu_get_flags(menu),
+                  servo_context_menu_get_link_url(menu),
+                  servo_context_menu_get_image_url(menu),
+                  &handled);
+
+    /* A handler may have run something that answered it (e.g. a reload
+     * withdrew the menu); only an unanswered menu is still ours. */
+    if (handled || g_menu_model_get_n_items(G_MENU_MODEL(model)) == 0) {
+        servo_gtk_web_view_dismiss_context_menu(self);
+        return FALSE;
+    }
+
+    return self->priv->context_menu != NULL;
+}
+
+/*
+ * ServoContextMenuCallback: show Servo's menu as a popover at the pointer,
+ * after the application had its say. The area Servo reports is the whole
+ * clicked element, so the pointer is the better anchor.
+ */
+static void
+servo_gtk_web_view_on_context_menu(ServoContextMenu *menu,
+                                   int32_t           x,
+                                   int32_t           y,
+                                   int32_t           width,
+                                   int32_t           height,
+                                   gpointer          user_data)
+{
+    ServoGtkWebView        *self = SERVO_GTK_WEB_VIEW(user_data);
+    ServoGtkWebViewPrivate *priv = self->priv;
+
+    (void) x;
+    (void) y;
+    (void) width;
+    (void) height;
+
+    /* Only one menu at a time: a new right click replaces the old menu. */
+    servo_gtk_web_view_dismiss_context_menu(self);
+    servo_gtk_web_view_destroy_context_popover(self);
+    priv->context_menu = menu;
+
+    GMenu *model = servo_gtk_web_view_build_context_model(self, menu);
+
+    if (!servo_gtk_web_view_offer_context_menu(self, menu, model)) {
+        g_object_unref(model);
+        return;
+    }
+
+    priv->context_popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(model));
+    g_object_unref(model);
+    gtk_widget_set_parent(priv->context_popover, GTK_WIDGET(self));
+    gtk_popover_set_has_arrow(GTK_POPOVER(priv->context_popover), FALSE);
+    gtk_widget_set_halign(priv->context_popover, GTK_ALIGN_START);
+    gtk_popover_set_pointing_to(GTK_POPOVER(priv->context_popover),
+                                &(GdkRectangle) { (int) priv->pointer_x,
+                                                  (int) priv->pointer_y, 1, 1 });
+    g_signal_connect(priv->context_popover, "closed",
+                     G_CALLBACK(servo_gtk_web_view_on_context_popover_closed), self);
+    gtk_popover_popup(GTK_POPOVER(priv->context_popover));
+}
+
+/* ServoContextMenuHiddenCallback: Servo withdrew the menu, e.g. on navigation. */
+static void
+servo_gtk_web_view_on_context_menu_hidden(gpointer user_data)
+{
+    ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+
+    if (self->priv->context_popover != NULL) {
+        gtk_popover_popdown(GTK_POPOVER(self->priv->context_popover));
+    }
 }
 
 /* Pump Servo's event loop once per frame clock tick. */
@@ -569,6 +809,13 @@ servo_gtk_web_view_dispose(GObject *object)
 
     g_clear_object(&self->frame);
 
+    /* A pending menu belongs to the web view about to be freed. */
+    if (self->priv != NULL) {
+        servo_gtk_web_view_dismiss_context_menu(self);
+        servo_gtk_web_view_destroy_context_popover(self);
+        g_clear_object(&self->priv->context_actions);
+    }
+
     /* Before the child goes: a GL handle still needs the area's context. */
     if (self->servo != NULL) {
         servo_webview_free(self->servo);
@@ -690,6 +937,8 @@ servo_gtk_web_view_on_gl_unrealize(GtkWidget *area, gpointer user_data)
     (void) area;
 
     if (self->servo != NULL) {
+        servo_gtk_web_view_dismiss_context_menu(self);
+        servo_gtk_web_view_destroy_context_popover(self);
         servo_webview_free(self->servo);
         self->servo = NULL;
         servo_gtk_web_view_update_scroll_polling(self);
@@ -819,6 +1068,9 @@ servo_gtk_web_view_ensure_servo(ServoGtkWebView *self, gint width, gint height)
         self->servo, servo_gtk_web_view_on_load_status_changed, self);
     servo_webview_set_navigation_request_callback(
         self->servo, servo_gtk_web_view_on_navigation_request, self);
+    servo_webview_set_context_menu_callback(
+        self->servo, servo_gtk_web_view_on_context_menu,
+        servo_gtk_web_view_on_context_menu_hidden, self);
     /* A new web view starts out loading its first page, so Servo never
      * reports that STARTED as a change; report it from here. */
     if (servo_webview_get_load_status(self->servo) != SERVO_LOAD_STATUS_COMPLETE) {
@@ -863,6 +1115,10 @@ servo_gtk_web_view_size_allocate(GtkWidget *widget,
 
     if (self->priv->area != NULL) {
         gtk_widget_allocate(self->priv->area, width, height, baseline, NULL);
+    }
+    /* A popover child has to be positioned by its parent's allocation. */
+    if (self->priv->context_popover != NULL) {
+        gtk_popover_present(GTK_POPOVER(self->priv->context_popover));
     }
 
     if (self->servo == NULL) {
@@ -1225,6 +1481,46 @@ servo_gtk_web_view_class_init(ServoGtkWebViewClass *klass)
             1,
             G_TYPE_STRING
         );
+    /**
+     * ServoGtkWebView::context-menu:
+     * @self: the #ServoGtkWebView
+     * @menu: the menu about to be shown, editable
+     * @flags: what the menu was opened on
+     * @link_uri: (nullable): the link under the pointer, if any
+     * @image_uri: (nullable): the image under the pointer, if any
+     *
+     * Emitted before a context menu is shown, with the entries the engine
+     * proposes: Back, Forward, Reload, Copy, Copy Link, ... each enabled only
+     * when it applies. They activate the `SERVO_GTK_CONTEXT_MENU_ACTION_*`
+     * actions, and run inside the engine (Copy reaches the clipboard).
+     *
+     * Edit @menu to change what is shown. Remove entries with
+     * servo_gtk_context_menu_remove() (or plain #GMenu calls), and add your
+     * own with any action the web view can reach -- `win.` or `app.` actions,
+     * or a group inserted on the web view. Use the action target to carry
+     * @link_uri along, e.g. `g_menu_item_set_action_and_target_value (item,
+     * "win.open-in-new-tab", g_variant_new_string (link_uri))`.
+     *
+     * Return %TRUE to show nothing (e.g. because you show a menu of your own);
+     * an empty @menu is not shown either.
+     *
+     * Returns: %TRUE to suppress the menu, %FALSE to show @menu
+     */
+    signals[CONTEXT_MENU] =
+        g_signal_new(
+            "context-menu",
+            G_TYPE_FROM_CLASS(klass),
+            G_SIGNAL_RUN_LAST,
+            G_STRUCT_OFFSET(ServoGtkWebViewClass, context_menu),
+            g_signal_accumulator_true_handled, NULL,
+            NULL,       /* default (generic) C marshaller */
+            G_TYPE_BOOLEAN,
+            4,
+            G_TYPE_MENU,
+            SERVO_GTK_TYPE_CONTEXT_MENU_FLAGS,
+            G_TYPE_STRING,
+            G_TYPE_STRING
+        );
 }
 
 static void
@@ -1266,6 +1562,21 @@ servo_gtk_web_view_init(ServoGtkWebView *self)
     g_signal_connect(key, "key-pressed", G_CALLBACK(servo_gtk_web_view_on_key_pressed), self);
     g_signal_connect(key, "key-released", G_CALLBACK(servo_gtk_web_view_on_key_released), self);
     gtk_widget_add_controller(widget, key);
+
+    /* The context menu's entries, enabled per menu from what Servo reports. */
+    self->priv->context_actions = g_simple_action_group_new();
+    for (guint i = 0; i < G_N_ELEMENTS(servo_gtk_context_actions); i++) {
+        if (servo_gtk_context_actions[i] == NULL) {
+            continue;
+        }
+        GSimpleAction *action = g_simple_action_new(servo_gtk_context_actions[i], NULL);
+        g_signal_connect(action, "activate",
+                         G_CALLBACK(servo_gtk_web_view_on_context_action), self);
+        g_action_map_add_action(G_ACTION_MAP(self->priv->context_actions), G_ACTION(action));
+        g_object_unref(action);
+    }
+    gtk_widget_insert_action_group(widget, "context-menu",
+                                   G_ACTION_GROUP(self->priv->context_actions));
 
     self->tick_id = gtk_widget_add_tick_callback(widget, servo_gtk_web_view_tick, NULL, NULL);
 }
@@ -1310,6 +1621,65 @@ servo_gtk_web_view_is_loading(ServoGtkWebView *self)
     g_return_val_if_fail(SERVO_GTK_IS_WEB_VIEW(self), FALSE);
 
     return self->priv->is_loading;
+}
+
+gboolean
+servo_gtk_context_menu_remove(GMenu *menu, const gchar *action)
+{
+    GMenuModel *model = G_MENU_MODEL(menu);
+    gboolean    removed = FALSE;
+
+    g_return_val_if_fail(G_IS_MENU(menu), FALSE);
+    g_return_val_if_fail(action != NULL, FALSE);
+
+    /* Backwards, so removing does not shift what is still to be visited. */
+    for (gint i = g_menu_model_get_n_items(model) - 1; i >= 0; i--) {
+        GMenuModel *section = g_menu_model_get_item_link(model, i, G_MENU_LINK_SECTION);
+        gchar      *item_action = NULL;
+
+        if (section != NULL) {
+            if (G_IS_MENU(section) &&
+                servo_gtk_context_menu_remove(G_MENU(section), action)) {
+                removed = TRUE;
+                if (g_menu_model_get_n_items(section) == 0) {
+                    g_menu_remove(menu, i);
+                }
+            }
+            g_object_unref(section);
+            continue;
+        }
+
+        if (g_menu_model_get_item_attribute(model, i, G_MENU_ATTRIBUTE_ACTION,
+                                            "s", &item_action) &&
+            g_strcmp0(item_action, action) == 0) {
+            g_menu_remove(menu, i);
+            removed = TRUE;
+        }
+        g_free(item_action);
+    }
+
+    return removed;
+}
+
+GType
+servo_gtk_context_menu_flags_get_type(void)
+{
+    static gsize type = 0;
+
+    if (g_once_init_enter(&type)) {
+        static const GFlagsValue values[] = {
+            { SERVO_GTK_CONTEXT_MENU_NONE,          "SERVO_GTK_CONTEXT_MENU_NONE",          "none" },
+            { SERVO_GTK_CONTEXT_MENU_LINK,          "SERVO_GTK_CONTEXT_MENU_LINK",          "link" },
+            { SERVO_GTK_CONTEXT_MENU_IMAGE,         "SERVO_GTK_CONTEXT_MENU_IMAGE",         "image" },
+            { SERVO_GTK_CONTEXT_MENU_EDITABLE_TEXT, "SERVO_GTK_CONTEXT_MENU_EDITABLE_TEXT", "editable-text" },
+            { SERVO_GTK_CONTEXT_MENU_SELECTION,     "SERVO_GTK_CONTEXT_MENU_SELECTION",     "selection" },
+            { 0, NULL, NULL }
+        };
+
+        g_once_init_leave(&type, g_flags_register_static("ServoGtkContextMenuFlags", values));
+    }
+
+    return type;
 }
 
 GType

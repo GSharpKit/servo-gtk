@@ -465,6 +465,41 @@ on_web_view_decide_navigation(ServoGtkWebView *web_view, const gchar *uri, gpoin
     return block;
 }
 
+/*
+ * Customise the context menu the engine proposes: on a link, offer opening it
+ * in a new tab (win.open-in-new-tab, with the link as target), and drop
+ * "Select All" to show that entries can go as well. Returning FALSE shows the
+ * edited menu.
+ */
+static gboolean
+on_web_view_context_menu(ServoGtkWebView          *web_view,
+                         GMenu                    *menu,
+                         ServoGtkContextMenuFlags  flags,
+                         const gchar              *link_uri,
+                         const gchar              *image_uri,
+                         gpointer                  user_data)
+{
+    (void) web_view;
+    (void) image_uri;
+    (void) user_data;
+
+    servo_gtk_context_menu_remove(menu, SERVO_GTK_CONTEXT_MENU_ACTION_SELECT_ALL);
+
+    if ((flags & SERVO_GTK_CONTEXT_MENU_LINK) && link_uri != NULL) {
+        GMenu     *section = g_menu_new();
+        GMenuItem *item = g_menu_item_new("Open Link in New Tab", NULL);
+
+        g_menu_item_set_action_and_target_value(item, "win.open-in-new-tab",
+                                                g_variant_new_string(link_uri));
+        g_menu_append_item(section, item);
+        g_menu_prepend_section(menu, NULL, G_MENU_MODEL(section));
+        g_object_unref(item);
+        g_object_unref(section);
+    }
+
+    return FALSE;
+}
+
 /* Page load progress: print it, the way a browser would drive a spinner. */
 static void
 on_web_view_load_changed(ServoGtkWebView *web_view, ServoGtkLoadEvent load_event, gpointer user_data)
@@ -673,6 +708,7 @@ add_tab(DemoWindow *win, const gchar *uri)
     g_signal_connect(web_view, "load-changed", G_CALLBACK(on_web_view_load_changed), tab);
     g_signal_connect(web_view, "decide-navigation",
                      G_CALLBACK(on_web_view_decide_navigation), tab);
+    g_signal_connect(web_view, "context-menu", G_CALLBACK(on_web_view_context_menu), tab);
 
     /*
      * ServoGtkWebView implements GtkScrollable, so putting it in a
@@ -746,6 +782,15 @@ on_new_tab_action(GSimpleAction *action, GVariant *parameter, gpointer user_data
     add_tab(user_data, "https://servo.org");
 }
 
+/* win.open-in-new-tab("uri"), offered by the context menu on links. */
+static void
+on_open_in_new_tab_action(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+{
+    (void) action;
+
+    add_tab(user_data, g_variant_get_string(parameter, NULL));
+}
+
 static void
 on_close_tab_action(GSimpleAction *action, GVariant *parameter, gpointer user_data)
 {
@@ -772,6 +817,8 @@ activate(GtkApplication *app, gpointer user_data)
     static const GActionEntry win_actions[] = {
         { .name = "new-tab",   .activate = on_new_tab_action },
         { .name = "close-tab", .activate = on_close_tab_action },
+        { .name = "open-in-new-tab", .activate = on_open_in_new_tab_action,
+          .parameter_type = "s" },
     };
     static const gchar *const new_tab_accels[]   = { "<Control>t", NULL };
     static const gchar *const close_tab_accels[] = { "<Control>w", NULL };
