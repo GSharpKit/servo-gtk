@@ -870,7 +870,8 @@ servo_gtk_web_view_draw(GtkDrawingArea *area,
 /*
  * GtkGLArea::render, GL path: GTK has made the area's context current and
  * bound its framebuffer; copy Servo's last frame into it. Before Servo exists
- * the offscreen framebuffer does not either, so leave the area to GTK.
+ * the offscreen framebuffer does not either, so paint the white background
+ * rather than leave the area's new, black, buffer showing.
  */
 static gboolean
 servo_gtk_web_view_on_gl_render(GtkGLArea    *area,
@@ -883,7 +884,7 @@ servo_gtk_web_view_on_gl_render(GtkGLArea    *area,
     (void) context;
 
     if (self->servo == NULL) {
-        return FALSE;
+        return servo_webview_gl_clear();
     }
 
     return servo_webview_gl_blit(self->servo,

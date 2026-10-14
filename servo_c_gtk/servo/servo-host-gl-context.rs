@@ -59,7 +59,8 @@ pub struct HostGlRenderingContext {
     glow_gl: Arc<glow::Context>,
     size: Cell<PhysicalSize<u32>>,
     framebuffer: GLuint,
-    color: GLuint,
+    /// Swapped on resize, so the last frame can be carried over.
+    color: Cell<GLuint>,
     depth_stencil: GLuint,
 }
 
@@ -119,7 +120,7 @@ impl HostGlRenderingContext {
             glow_gl,
             size: Cell::new(size),
             framebuffer,
-            color: renderbuffers[0],
+            color: Cell::new(renderbuffers[0]),
             depth_stencil: renderbuffers[1],
         };
 
@@ -130,7 +131,7 @@ impl HostGlRenderingContext {
             gl::FRAMEBUFFER,
             gl::COLOR_ATTACHMENT0,
             gl::RENDERBUFFER,
-            context.color,
+            context.color.get(),
         );
         gl.framebuffer_renderbuffer(
             gl::FRAMEBUFFER,
@@ -192,10 +193,88 @@ impl HostGlRenderingContext {
     fn allocate_storage(&self, size: PhysicalSize<u32>) {
         let gl = &self.gleam_gl;
         let (width, height) = (size.width as i32, size.height as i32);
-        gl.bind_renderbuffer(gl::RENDERBUFFER, self.color);
+        gl.bind_renderbuffer(gl::RENDERBUFFER, self.color.get());
         gl.renderbuffer_storage(gl::RENDERBUFFER, gl::RGBA8, width, height);
         gl.bind_renderbuffer(gl::RENDERBUFFER, self.depth_stencil);
         gl.renderbuffer_storage(gl::RENDERBUFFER, gl::DEPTH24_STENCIL8, width, height);
+        gl.bind_renderbuffer(gl::RENDERBUFFER, 0);
+    }
+
+    /// Resize the buffers, keeping the last frame in the new colour buffer.
+    ///
+    /// Servo resizes the context as soon as the host does, but only paints
+    /// again once the page has been laid out at the new size, and the GL area
+    /// renders in between. Starting the new buffer blank showed one white
+    /// frame per resize -- a white flicker for as long as a window edge is
+    /// dragged. Instead the old frame is copied over unscaled, pinned to the
+    /// top-left like a browser does, and only the newly exposed strip is white.
+    fn resize_storage(&self, old_size: PhysicalSize<u32>, size: PhysicalSize<u32>) {
+        let gl = &self.gleam_gl;
+        let old_color = self.color.get();
+        let new_color = gl.gen_renderbuffers(1)[0];
+        gl.bind_renderbuffer(gl::RENDERBUFFER, new_color);
+        gl.renderbuffer_storage(
+            gl::RENDERBUFFER,
+            gl::RGBA8,
+            size.width as i32,
+            size.height as i32,
+        );
+        gl.bind_renderbuffer(gl::RENDERBUFFER, 0);
+
+        // Scratch framebuffer for the new colour buffer; `self.framebuffer`
+        // still has the old one attached and is the blit source.
+        let scratch = gl.gen_framebuffers(1)[0];
+        gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, scratch);
+        gl.framebuffer_renderbuffer(
+            gl::DRAW_FRAMEBUFFER,
+            gl::COLOR_ATTACHMENT0,
+            gl::RENDERBUFFER,
+            new_color,
+        );
+        gl.disable(gl::SCISSOR_TEST);
+        gl.color_mask(true, true, true, true);
+        gl.clear_color(1.0, 1.0, 1.0, 1.0);
+        gl.clear(gl::COLOR_BUFFER_BIT);
+
+        // GL's origin is bottom-left, so pinning the top means offsetting
+        // both rectangles from their own top edge.
+        let width = old_size.width.min(size.width) as i32;
+        let height = old_size.height.min(size.height) as i32;
+        let old_top = old_size.height as i32;
+        let new_top = size.height as i32;
+        gl.bind_framebuffer(gl::READ_FRAMEBUFFER, self.framebuffer);
+        gl.blit_framebuffer(
+            0,
+            old_top - height,
+            width,
+            old_top,
+            0,
+            new_top - height,
+            width,
+            new_top,
+            gl::COLOR_BUFFER_BIT,
+            gl::NEAREST,
+        );
+
+        gl.bind_framebuffer(gl::FRAMEBUFFER, self.framebuffer);
+        gl.framebuffer_renderbuffer(
+            gl::FRAMEBUFFER,
+            gl::COLOR_ATTACHMENT0,
+            gl::RENDERBUFFER,
+            new_color,
+        );
+        gl.delete_framebuffers(&[scratch]);
+        gl.delete_renderbuffers(&[old_color]);
+        self.color.set(new_color);
+
+        // Depth and stencil are rebuilt by every paint; no need to keep them.
+        gl.bind_renderbuffer(gl::RENDERBUFFER, self.depth_stencil);
+        gl.renderbuffer_storage(
+            gl::RENDERBUFFER,
+            gl::DEPTH24_STENCIL8,
+            size.width as i32,
+            size.height as i32,
+        );
         gl.bind_renderbuffer(gl::RENDERBUFFER, 0);
     }
 
@@ -210,13 +289,31 @@ impl HostGlRenderingContext {
     }
 }
 
+/// Fill the framebuffer currently bound for drawing with white, the same
+/// neutral background a [`HostGlRenderingContext`] starts with. For the host's
+/// `render` handler while there is no webview to blit yet: a `GtkGLArea` left
+/// to itself shows its freshly allocated buffer, which is black, so a new view
+/// flashed black until Servo had created the webview and painted.
+///
+/// The host's context must be current, which it is inside `render`.
+pub fn clear_bound_framebuffer() -> Result<(), String> {
+    let loader = sys::Loader::for_current_context()?;
+    // Only entry points shared by GL and GLES are used, so either table does.
+    let gl = unsafe { gl::GlFns::load_with(|name| loader.load(name)) };
+    gl.disable(gl::SCISSOR_TEST);
+    gl.color_mask(true, true, true, true);
+    gl.clear_color(1.0, 1.0, 1.0, 1.0);
+    gl.clear(gl::COLOR_BUFFER_BIT);
+    Ok(())
+}
+
 impl Drop for HostGlRenderingContext {
     fn drop(&mut self) {
         // If the host context is already gone, so are these objects.
         if (self.make_current)(self.user_data) {
             self.gleam_gl.delete_framebuffers(&[self.framebuffer]);
             self.gleam_gl
-                .delete_renderbuffers(&[self.color, self.depth_stencil]);
+                .delete_renderbuffers(&[self.color.get(), self.depth_stencil]);
         }
     }
 }
@@ -252,10 +349,9 @@ impl RenderingContext for HostGlRenderingContext {
             return;
         }
 
-        self.size.set(size);
+        let old_size = self.size.replace(size);
         if (self.make_current)(self.user_data) {
-            self.allocate_storage(size);
-            self.clear();
+            self.resize_storage(old_size, size);
         }
     }
 

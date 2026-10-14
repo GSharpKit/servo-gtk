@@ -123,6 +123,14 @@ bool servo_webview_gl_blit(ServoWebViewHandle *webview,
                            uint32_t            width,
                            uint32_t            height);
 
+/*
+ * Fill the framebuffer currently bound for drawing with the white background.
+ * Call from the GtkGLArea "render" handler while there is no handle to blit
+ * yet; otherwise the area shows its uninitialised, black, buffer. Returns
+ * false (drawing nothing) if GL could not be resolved for the current context.
+ */
+bool servo_webview_gl_clear(void);
+
 void servo_webview_set_cursor_changed_callback(ServoWebViewHandle        *webview,
                                                ServoCursorChangedCallback callback,
                                                void                      *user_data);

@@ -28,6 +28,7 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use euclid::Point2D;
 use servo::{
@@ -202,6 +203,12 @@ struct UrlCallback {
 
 /// Servo delegate that turns presented frames, cursor changes and URL changes
 /// into calls into the registered C callbacks.
+/// How long the previous page stays on screen while the next one loads, see
+/// [`EmbedderDelegate::hold_frames_since`]. Past this, frames of a page that
+/// is still loading are shown as they come, so a slow page renders
+/// progressively.
+const FRAME_HOLD_LIMIT: Duration = Duration::from_millis(500);
+
 struct EmbedderDelegate {
     rendering_context: Rc<dyn RenderingContext>,
     /// Frames stay on the GPU, in the host's GL context: they are announced
@@ -223,6 +230,18 @@ struct EmbedderDelegate {
     browsing_context_ready: Cell<bool>,
     /// The latest load requested before that, issued once it exists.
     pending_load: RefCell<Option<Url>>,
+    /// Whether a frame has been handed to the host yet.
+    has_presented: Cell<bool>,
+    /// Set while a navigation away from a shown page is loading. Servo shows
+    /// the new document as soon as it is activated, before layout has
+    /// anything to draw, so its first frames are just the background: a white
+    /// blink before every page. Until the load completes (or
+    /// [`FRAME_HOLD_LIMIT`] passes) those frames are not painted, and the host
+    /// keeps the previous page on screen.
+    hold_frames_since: Cell<Option<Instant>>,
+    /// Whether a frame was held back since then, so the completed page has
+    /// to be painted rather than wait for its next frame.
+    frame_held: Cell<bool>,
 }
 
 impl EmbedderDelegate {
@@ -241,6 +260,30 @@ impl EmbedderDelegate {
             console_callback: RefCell::new(None),
             browsing_context_ready: Cell::new(false),
             pending_load: RefCell::new(None),
+            has_presented: Cell::new(false),
+            hold_frames_since: Cell::new(None),
+            frame_held: Cell::new(false),
+        }
+    }
+
+    /// A navigation started. The very first page has nothing to keep on
+    /// screen, so it shows the background until it paints.
+    fn start_holding_frames(&self) {
+        if self.has_presented.get() {
+            self.hold_frames_since.set(Some(Instant::now()));
+            self.frame_held.set(false);
+        }
+    }
+
+    /// Whether frames are still held back, see [`Self::hold_frames_since`].
+    fn holding_frames(&self) -> bool {
+        match self.hold_frames_since.get() {
+            Some(since) if since.elapsed() < FRAME_HOLD_LIMIT => true,
+            Some(_) => {
+                self.hold_frames_since.set(None);
+                false
+            }
+            None => false,
         }
     }
 
@@ -282,10 +325,11 @@ impl EmbedderDelegate {
         };
         (cb.0)(load_status_to_c(status), cb.1);
     }
-}
 
-impl WebViewDelegate for EmbedderDelegate {
-    fn notify_new_frame_ready(&self, webview: WebView) {
+    /// Paint the current frame and hand it to the host.
+    fn present_frame(&self, webview: &WebView) {
+        self.has_presented.set(true);
+
         if self.host_gl {
             // Painted into the offscreen framebuffer; the host blits it from
             // its own render handler, so there is nothing to read back.
@@ -333,6 +377,16 @@ impl WebViewDelegate for EmbedderDelegate {
         if let Some((func, user_data)) = cb {
             func(data.as_ptr(), width, height, user_data);
         }
+    }
+}
+
+impl WebViewDelegate for EmbedderDelegate {
+    fn notify_new_frame_ready(&self, webview: WebView) {
+        if self.holding_frames() {
+            self.frame_held.set(true);
+            return;
+        }
+        self.present_frame(&webview);
     }
 
     fn show_console_message(&self, _webview: WebView, level: ConsoleLogLevel, message: String) {
@@ -437,7 +491,16 @@ impl WebViewDelegate for EmbedderDelegate {
         }
     }
 
-    fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
+    fn notify_load_status_changed(&self, webview: WebView, status: LoadStatus) {
+        match status {
+            LoadStatus::Started => self.start_holding_frames(),
+            LoadStatus::Complete => {
+                if self.hold_frames_since.take().is_some() && self.frame_held.take() {
+                    self.present_frame(&webview);
+                }
+            }
+            _ => {}
+        }
         self.report_load_status(status);
     }
 
@@ -967,6 +1030,24 @@ pub unsafe extern "C" fn servo_webview_gl_blit(
     }
 }
 
+/// Fill the framebuffer currently bound for drawing with the white background.
+/// Call it from the GL area's `render` handler while there is no webview to
+/// blit yet, where the host's context is current and the area's framebuffer is
+/// bound; otherwise the area shows its uninitialised, black, buffer.
+///
+/// Returns false, drawing nothing, if GL could not be resolved for the current
+/// context.
+#[unsafe(no_mangle)]
+pub extern "C" fn servo_webview_gl_clear() -> bool {
+    match host_gl_context::clear_bound_framebuffer() {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("servo_webview_gl_clear: {error}");
+            false
+        }
+    }
+}
+
 /// Register the frame sink invoked once per presented frame. Pass a NULL
 /// `callback` to clear it.
 ///
@@ -1163,6 +1244,7 @@ pub unsafe extern "C" fn servo_webview_reload(webview: *mut ServoWebViewHandle) 
         // "unchanged" -- so report it here or the reload would never start.
         let previous = handle.webview.load_status();
         handle.webview.reload();
+        handle.delegate.start_holding_frames();
         if previous != LoadStatus::Started {
             handle.delegate.report_load_status(LoadStatus::Started);
         }

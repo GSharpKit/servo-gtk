@@ -55,6 +55,12 @@ servo_webview_gl_blit(ServoWebViewHandle *webview, uint32_t width, uint32_t heig
     return false;
 }
 
+bool
+servo_webview_gl_clear(void)
+{
+    return false;
+}
+
 void
 servo_webview_set_frame_ready_callback(ServoWebViewHandle     *webview,
                                        ServoFrameReadyCallback callback,
