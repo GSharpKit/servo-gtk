@@ -1347,7 +1347,10 @@ pub unsafe extern "C" fn servo_webview_pointer_button(
         )));
 }
 
-/// Scroll by `(dx, dy)` wheel deltas.
+/// Scroll by `(dx, dy)` wheel deltas, 20 pixels per unit.
+///
+/// Kept for existing callers; a toolkit that knows its own scroll step should
+/// use [`servo_webview_scroll_pixels`] instead.
 ///
 /// # Safety
 /// `webview` must be a valid handle.
@@ -1359,17 +1362,30 @@ pub unsafe extern "C" fn servo_webview_scroll(
     x: f64,
     y: f64,
 ) {
+    // The 20.0 multiplier matches Servo's winit_minimal example.
+    unsafe { servo_webview_scroll_pixels(webview, 20.0 * dx, 20.0 * dy, x, y) };
+}
+
+/// Scroll by `(dx, dy)` pixels, in the same coordinate space as `(x, y)`.
+///
+/// # Safety
+/// `webview` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_scroll_pixels(
+    webview: *mut ServoWebViewHandle,
+    dx: f64,
+    dy: f64,
+    x: f64,
+    y: f64,
+) {
     if let Some(handle) = unsafe { as_handle(webview) } {
         // Servo scrolls the scrollable area *under the given point*, so this
         // must be where the pointer actually is. A fixed point would scroll
         // whatever happens to sit there — with the PDF.js viewer, a corner
         // point lands on the toolbar and the document never moves.
-        //
-        // The 20.0 multiplier matches Servo's winit_minimal example.
         handle.webview.notify_scroll_event(
             Scroll::Delta(WebViewVector::Device(DeviceVector2D::new(
-                20.0 * dx as f32,
-                20.0 * dy as f32,
+                dx as f32, dy as f32,
             ))),
             WebViewPoint::Device(Point2D::new(x as f32, y as f32)),
         );

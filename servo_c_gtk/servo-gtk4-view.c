@@ -3,6 +3,7 @@
 #include "servo-webview.h"
 
 #include <gdk/gdkkeysyms.h>
+#include <math.h>
 
 /*
  * Printing has two backends, because the platforms differ fundamentally in
@@ -1206,6 +1207,10 @@ servo_gtk_web_view_on_released(GtkGestureClick *gesture,
  * GtkEventControllerScroll::scroll: the controller already delivers scroll
  * deltas (dx, dy), including smooth-scroll steps, so no direction decoding is
  * needed as it was under GTK3's GdkEventScroll.
+ *
+ * Scaled the way GtkScrolledWindow does it, so the page scrolls like every
+ * other scrollable in the application: touchpad (surface) deltas are already
+ * pixels, and a wheel unit is page_size^(2/3) pixels.
  */
 static gboolean
 servo_gtk_web_view_on_scroll(GtkEventControllerScroll *controller,
@@ -1214,12 +1219,21 @@ servo_gtk_web_view_on_scroll(GtkEventControllerScroll *controller,
                              gpointer                  user_data)
 {
     ServoGtkWebView *self = SERVO_GTK_WEB_VIEW(user_data);
+    GtkWidget       *widget = GTK_WIDGET(self);
 
+#if GTK_CHECK_VERSION(4, 8, 0)
+    if (gtk_event_controller_scroll_get_unit(controller) == GDK_SCROLL_UNIT_WHEEL)
+#else
     (void) controller;
+#endif
+    {
+        dx *= pow(MAX(1, gtk_widget_get_width(widget)), 2.0 / 3.0);
+        dy *= pow(MAX(1, gtk_widget_get_height(widget)), 2.0 / 3.0);
+    }
 
     if (self->servo != NULL) {
-        servo_webview_scroll(self->servo, dx, dy,
-                             self->priv->pointer_x, self->priv->pointer_y);
+        servo_webview_scroll_pixels(self->servo, dx, dy,
+                                    self->priv->pointer_x, self->priv->pointer_y);
     }
 
     return TRUE;

@@ -178,6 +178,12 @@ void servo_webview_scroll(ServoWebViewHandle *webview, double dx, double dy,
     (void) webview; (void) dx; (void) dy; (void) x; (void) y;
 }
 
+void servo_webview_scroll_pixels(ServoWebViewHandle *webview, double dx, double dy,
+                                 double x, double y)
+{
+    (void) webview; (void) dx; (void) dy; (void) x; (void) y;
+}
+
 void
 servo_webview_key(ServoWebViewHandle *webview,
                   uint32_t            key,

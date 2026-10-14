@@ -339,6 +339,10 @@ function(add_servo_gtk_library)
             ${SERVO_LINK_LIB}
             ${gtk_libraries}
     )
+    # pow() for the scroll step; part of the C runtime on Windows.
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(${lib} PRIVATE m)
+    endif()
 
     # Printing backend for servo_gtk_web_view_print_pdf(). Kept PRIVATE: the
     # public header exposes only plain C types, so consumers do not need these
@@ -410,6 +414,9 @@ function(add_servo_gtk_library)
             target_link_libraries(${lib}-scan PRIVATE shell32 comdlg32 gdi32)
         endif()
         target_link_libraries(${lib}-scan PRIVATE ${gtk_libraries})
+        if(UNIX AND NOT APPLE)
+            target_link_libraries(${lib}-scan PRIVATE m)
+        endif()
 
         set(scan_dir ${CMAKE_CURRENT_BINARY_DIR}/scan${ARG_MAJOR})
         set_target_properties(${lib}-scan PROPERTIES

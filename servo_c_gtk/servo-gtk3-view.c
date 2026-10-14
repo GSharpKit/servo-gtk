@@ -3,6 +3,7 @@
 #include "servo-webview.h"
 
 #include <gdk/gdkkeysyms.h>
+#include <math.h>
 
 /*
  * Printing has two backends, because the platforms differ fundamentally in
@@ -1233,8 +1234,17 @@ servo_gtk_web_view_scroll(GtkWidget *widget, GdkEventScroll *event)
         }
     }
 
+    /*
+     * GtkScrolledWindow's own step: page_size^(2/3) pixels per unit, for wheel
+     * notches and touchpad deltas alike. A fixed step is either too slow on a
+     * tall view or too fast on a small one, and this way the page scrolls like
+     * every other scrollable in the application.
+     */
+    dx *= pow(MAX(1, gtk_widget_get_allocated_width(widget)), 2.0 / 3.0);
+    dy *= pow(MAX(1, gtk_widget_get_allocated_height(widget)), 2.0 / 3.0);
+
     if (self->servo != NULL) {
-        servo_webview_scroll(self->servo, dx, dy, event->x, event->y);
+        servo_webview_scroll_pixels(self->servo, dx, dy, event->x, event->y);
     }
 
     return TRUE;

@@ -303,12 +303,21 @@ void servo_webview_pointer_button(ServoWebViewHandle *webview,
  * Scroll by (dx, dy) at surface position (x, y). Servo scrolls the scrollable
  * area under that point, so it must be the pointer's real position: a fixed
  * point scrolls whatever sits there instead of what the user is pointing at.
+ *
+ * servo_webview_scroll() takes wheel units of 20 pixels each;
+ * servo_webview_scroll_pixels() takes pixels, in the same space as (x, y), so
+ * a toolkit can apply its own scroll step.
  */
 void servo_webview_scroll(ServoWebViewHandle *webview,
                           double              dx,
                           double              dy,
                           double              x,
                           double              y);
+void servo_webview_scroll_pixels(ServoWebViewHandle *webview,
+                                 double              dx,
+                                 double              dy,
+                                 double              x,
+                                 double              y);
 
 /*
  * Named keys understood by servo_webview_key(). SERVO_KEY_CHARACTER means the
