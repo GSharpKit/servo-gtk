@@ -218,6 +218,11 @@ struct EmbedderDelegate {
     /// `hide_embedder_control` can be passed on.
     context_menu_id: Cell<Option<EmbedderControlId>>,
     console_callback: RefCell<Option<ConsoleCallback>>,
+    /// Set once the top-level browsing context exists, see
+    /// [`EmbedderDelegate::load_when_ready`].
+    browsing_context_ready: Cell<bool>,
+    /// The latest load requested before that, issued once it exists.
+    pending_load: RefCell<Option<Url>>,
 }
 
 impl EmbedderDelegate {
@@ -234,6 +239,34 @@ impl EmbedderDelegate {
             context_menu_callbacks: RefCell::new(None),
             context_menu_id: Cell::new(None),
             console_callback: RefCell::new(None),
+            browsing_context_ready: Cell::new(false),
+            pending_load: RefCell::new(None),
+        }
+    }
+
+    /// Load `url`, or hold it back until the top-level browsing context
+    /// exists. The constellation only creates that context when the first
+    /// document is activated, and drops a `LoadUrl` that arrives before it
+    /// ("LoadUrl for unknown browsing context"), leaving the view on its
+    /// initial page.
+    fn load_when_ready(&self, webview: &WebView, url: Url) {
+        if self.browsing_context_ready.get() {
+            webview.load(url);
+        } else {
+            // Like consecutive loads, only the latest one matters.
+            self.pending_load.replace(Some(url));
+        }
+    }
+
+    /// The constellation reports the history of a webview right after
+    /// creating its browsing context, which is what reaches
+    /// `notify_url_changed` first.
+    fn mark_browsing_context_ready(&self, webview: &WebView) {
+        if self.browsing_context_ready.replace(true) {
+            return;
+        }
+        if let Some(url) = self.pending_load.take() {
+            webview.load(url);
         }
     }
 
@@ -408,7 +441,9 @@ impl WebViewDelegate for EmbedderDelegate {
         self.report_load_status(status);
     }
 
-    fn notify_url_changed(&self, _webview: WebView, url: Url) {
+    fn notify_url_changed(&self, webview: WebView, url: Url) {
+        self.mark_browsing_context_ready(&webview);
+
         let Some(cb) = self.url_callback.borrow().as_ref().map(|c| (c.func, c.user_data))
         else {
             return;
@@ -715,12 +750,11 @@ fn experimental_preferences() -> Preferences {
 ///
 /// * `width` / `height` — initial surface size in device pixels.
 /// * `initial_uri` — the URL to load when the webview is created, or NULL to
-///   start on `about:blank`. Passing the initial URL here (rather than calling
-///   [`servo_webview_load_uri`] right after creation) is required for it to
-///   take effect: Servo creates the top-level browsing context together with
-///   this URL, whereas a separate `load` issued before the browsing context
-///   exists is dropped by the constellation. Invalid URLs fall back to
-///   `about:blank`.
+///   start on `about:blank`. Prefer passing the initial URL here over calling
+///   [`servo_webview_load_uri`] right after creation: Servo creates the
+///   top-level browsing context together with this URL, whereas a separate
+///   load is held back until that context exists and loads `about:blank`
+///   first. Invalid URLs fall back to `about:blank`.
 ///
 /// Returns an owning handle, or NULL on failure. Free it with
 /// [`servo_webview_free`].
@@ -1075,10 +1109,6 @@ pub unsafe extern "C" fn servo_webview_get_load_status(webview: *mut ServoWebVie
     }
 }
 
-/// Begin loading `uri`. Invalid URLs are ignored.
-///
-/// # Safety
-/// `webview` must be a valid handle and `uri` a valid NUL-terminated C string.
 /// Register the console-message callback, invoked for every `console.*` call
 /// made by the page. Pass a NULL `callback` to clear it.
 ///
@@ -1097,6 +1127,12 @@ pub unsafe extern "C" fn servo_webview_set_console_message_callback(
         callback.map(|func| ConsoleCallback { func, user_data });
 }
 
+/// Begin loading `uri`. Invalid URLs are ignored. Requested before the
+/// top-level browsing context exists, the load is held back and issued once it
+/// does, see [`EmbedderDelegate::load_when_ready`].
+///
+/// # Safety
+/// `webview` must be a valid handle and `uri` a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn servo_webview_load_uri(
     webview: *mut ServoWebViewHandle,
@@ -1110,7 +1146,7 @@ pub unsafe extern "C" fn servo_webview_load_uri(
     }
     if let Ok(uri) = unsafe { CStr::from_ptr(uri) }.to_str() {
         if let Ok(url) = Url::parse(uri) {
-            handle.webview.load(url);
+            handle.delegate.load_when_ready(&handle.webview, url);
         }
     }
 }

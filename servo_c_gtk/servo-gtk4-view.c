@@ -1014,8 +1014,8 @@ servo_gtk_web_view_fallback_to_cpu(gpointer user_data)
  * area's realize; whichever comes last does it.
  *
  * Any URI requested before this is passed as the initial URL: Servo creates
- * the browsing context together with it. Issuing a separate load here instead
- * would race the context's creation and be dropped.
+ * the browsing context together with it. A separate load here instead would
+ * have to wait for that context and load about:blank first.
  */
 static void
 servo_gtk_web_view_ensure_servo(ServoGtkWebView *self, gint width, gint height)

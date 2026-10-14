@@ -1057,8 +1057,8 @@ servo_gtk_web_view_create_idle(gpointer user_data)
 
     /*
      * Pass any URI requested before creation as the initial URL: Servo creates
-     * the browsing context together with it. Issuing a separate load here
-     * instead would race the context's creation and be dropped.
+     * the browsing context together with it. A separate load here instead
+     * would have to wait for that context and load about:blank first.
      */
     if (priv->use_gl) {
         GtkGLArea *area = GTK_GL_AREA(priv->area);

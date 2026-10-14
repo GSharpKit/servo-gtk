@@ -61,11 +61,11 @@ typedef void (*ServoUrlChangedCallback)(const char *url,
 /*
  * Create a webview with an initial surface of width x height device pixels.
  * `initial_uri` is the URL to load on creation, or NULL to start on
- * about:blank. The initial URL MUST be supplied here rather than via a
- * separate servo_webview_load_uri() call immediately after creation: Servo
- * creates the browsing context together with this URL, and a load issued
- * before that context exists is silently dropped. Returns NULL on failure;
- * free with servo_webview_free().
+ * about:blank. Prefer supplying the initial URL here over a separate
+ * servo_webview_load_uri() call immediately after creation: Servo creates the
+ * browsing context together with this URL, whereas a separate load has to wait
+ * for that context and loads about:blank first. Returns NULL on failure; free
+ * with servo_webview_free().
  */
 ServoWebViewHandle *servo_webview_new(uint32_t    width,
                                       uint32_t    height,
@@ -269,6 +269,11 @@ void servo_webview_set_console_message_callback(ServoWebViewHandle         *webv
                                                 void                       *user_data);
 
 /* Navigation. */
+
+/*
+ * Load `uri`. Requested before the top-level browsing context exists, the load
+ * is held back and issued once it does; only the latest such request is kept.
+ */
 void servo_webview_load_uri(ServoWebViewHandle *webview, const char *uri);
 void servo_webview_reload(ServoWebViewHandle *webview);
 void servo_webview_go_back(ServoWebViewHandle *webview);
