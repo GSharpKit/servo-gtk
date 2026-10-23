@@ -1,0 +1,46 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug (GSharpKit GTK)",
+      "description": "Native macOS debug build. GTK3/GTK4 are provided by GSharpKit; PKG_CONFIG_PATH points pkg-config at its .pc files so pkg_check_modules(gtk+-3.0 / gtk4) resolves.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "environment": {
+        "PKG_CONFIG_PATH": "/Library/Frameworks/GSharpKit/lib/pkgconfig:/Library/Frameworks/GSharpKit/share/pkgconfig:$penv{PKG_CONFIG_PATH}"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (GSharpKit GTK)",
+      "description": "Native macOS release build. Links the optimized Cargo profile (target/release/libservoshell).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "environment": {
+        "PKG_CONFIG_PATH": "/Library/Frameworks/GSharpKit/lib/pkgconfig:/Library/Frameworks/GSharpKit/share/pkgconfig:$penv{PKG_CONFIG_PATH}"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    }
+  ]
+}
