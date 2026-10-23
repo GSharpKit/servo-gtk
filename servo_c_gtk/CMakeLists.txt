@@ -310,6 +310,16 @@ function(add_servo_gtk_library)
     set(gtk_cflags_other  ${${ARG_GTK_PREFIX}_CFLAGS_OTHER})
     set(gtk_cflags        ${${ARG_GTK_PREFIX}_CFLAGS})
 
+    # pkg_check_modules returns GTK as bare library names (-lgtk-3 ...). The
+    # linker only finds them if the -L search path is given too. On distros GTK
+    # lives in the default lib dirs, so the link works without it; when GTK sits
+    # in a non-default prefix (e.g. macOS with GSharpKit under
+    # /Library/Frameworks/GSharpKit/lib) the link fails with "library 'gtk-3' not
+    # found". <PREFIX>_LIBRARY_DIRS carries exactly the -L that pkg-config
+    # reports, so feeding it to target_link_directories is correct everywhere:
+    # redundant (harmless) in the default-path case, required otherwise.
+    set(gtk_library_dirs  ${${ARG_GTK_PREFIX}_LIBRARY_DIRS})
+
     # g-ir-scanner's option parser only accepts preprocessor-style flags
     # (-I/-D/-U) among the compiler flags. GTK4's cflags carry arch/codegen flags
     # (-mfpmath=sse / -msse / -msse2, pulled in via graphene) that make it error
@@ -334,6 +344,8 @@ function(add_servo_gtk_library)
     target_compile_options(${lib} PRIVATE ${gtk_cflags_other})
 
     add_dependencies(${lib} SERVO)
+    # PUBLIC so the -L propagates to the demo, which also links GTK directly.
+    target_link_directories(${lib} PUBLIC ${gtk_library_dirs})
     target_link_libraries(${lib}
             PUBLIC
             ${SERVO_LINK_LIB}
@@ -413,6 +425,7 @@ function(add_servo_gtk_library)
         elseif(WIN32)
             target_link_libraries(${lib}-scan PRIVATE shell32 comdlg32 gdi32)
         endif()
+        target_link_directories(${lib}-scan PRIVATE ${gtk_library_dirs})
         target_link_libraries(${lib}-scan PRIVATE ${gtk_libraries})
         if(UNIX AND NOT APPLE)
             target_link_libraries(${lib}-scan PRIVATE m)
@@ -525,6 +538,10 @@ function(add_servo_gtk_library)
     target_compile_options(${lib}-demo
             PRIVATE
             ${gtk_cflags_other})
+
+    target_link_directories(${lib}-demo
+            PRIVATE
+            ${gtk_library_dirs})
 
     target_link_libraries(${lib}-demo
             PRIVATE
