@@ -20,6 +20,13 @@
 #include "servo-webview.h"
 #include "servo-pdf-server.h"
 
+bool
+servo_webview_set_data_directory(const char *path)
+{
+    (void) path;
+    return false;
+}
+
 ServoWebViewHandle *
 servo_webview_new(uint32_t width, uint32_t height, const char *initial_uri)
 {
