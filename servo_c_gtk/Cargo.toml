@@ -51,6 +51,12 @@ log = "0.4"
 # mozalloc_abort both end there.
 libc = "0.2"
 #primeorder = "=0.14.0-rc.14"
+# Not used directly -- only here to hold back what `rsa 0.10.0-rc.18` (via
+# servo-script's webcrypto) resolves to. rsa asks for `^0.8.0-rc.4`, which
+# Cargo lets rc.5 satisfy, but rc.5 made `RsaPrivateKey`/`RsaPublicKey`
+# generic and rsa no longer compiles against it. Cargo.lock is regenerated on
+# every build, so the pin has to live here. Drop once rsa catches up.
+pkcs1 = { version = "=0.8.0-rc.4", default-features = false }
 
 # ==========================================================================
 # CPU-only rendering
