@@ -258,6 +258,28 @@ typedef void (*ServoGtkPrintResultCallback) (
 );
 
 /**
+ * servo_gtk_web_view_set_data_directory:
+ * @path: (type filename) (nullable): directory to keep cookies in, or %NULL
+ *   to keep them in memory only
+ *
+ * Makes every #ServoGtkWebView in the process read its cookies from, and
+ * write them back to, `cookie_jar.json` in @path. The file is read when the
+ * first web view is created and written when the last one is freed; the
+ * directory is created if it does not exist.
+ *
+ * Servo keeps `hsts_list.json`, `localstorage.json` and `auth_cache.json` in
+ * the same directory. The last holds HTTP authentication credentials in plain
+ * text, so use a directory only the user can read, e.g. one below
+ * g_get_user_data_dir().
+ *
+ * Must be called before the first web view is created.
+ *
+ * Returns: %TRUE on success; %FALSE if a web view already exists or the
+ *   directory cannot be created
+ */
+gboolean servo_gtk_web_view_set_data_directory(const gchar *path);
+
+/**
  * servo_gtk_web_view_can_print:
  *
  * Whether this build has a printing backend, and therefore whether

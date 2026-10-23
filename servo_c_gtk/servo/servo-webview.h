@@ -59,6 +59,20 @@ typedef void (*ServoUrlChangedCallback)(const char *url,
                                         void       *user_data);
 
 /*
+ * Persist cookies in `path`/cookie_jar.json: read when Servo starts (the first
+ * servo_webview_new*()), written when it shuts down (the last
+ * servo_webview_free()). NULL, the default, keeps cookies in memory only.
+ *
+ * Servo uses the same directory for hsts_list.json, localstorage.json and
+ * auth_cache.json -- the latter holds HTTP authentication credentials in
+ * plain text, so pick a directory only the user can read.
+ *
+ * `path` is UTF-8 and is created if missing. Call before the first webview is
+ * created; returns false afterwards, or if the directory cannot be created.
+ */
+bool servo_webview_set_data_directory(const char *path);
+
+/*
  * Create a webview with an initial surface of width x height device pixels.
  * `initial_uri` is the URL to load on creation, or NULL to start on
  * about:blank. Prefer supplying the initial URL here over a separate

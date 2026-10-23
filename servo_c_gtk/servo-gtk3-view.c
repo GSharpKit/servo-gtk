@@ -1813,6 +1813,24 @@ servo_gtk_web_view_print_done(ServoGtkWebView             *self,
 }
 
 gboolean
+servo_gtk_web_view_set_data_directory(const gchar *path)
+{
+    gchar *utf8 = NULL;
+    gboolean ok;
+
+    /* GLib filenames are UTF-8 on Windows already; elsewhere convert them. */
+    if (path != NULL) {
+        utf8 = g_filename_to_utf8(path, -1, NULL, NULL, NULL);
+        if (utf8 == NULL)
+            return FALSE;
+    }
+
+    ok = servo_webview_set_data_directory(utf8);
+    g_free(utf8);
+    return ok;
+}
+
+gboolean
 servo_gtk_web_view_can_print(void)
 {
 #ifdef SERVO_GTK_CAN_PRINT

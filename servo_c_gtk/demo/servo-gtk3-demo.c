@@ -844,11 +844,34 @@ activate(GtkApplication *app, gpointer user_data)
     add_tab(win, "https://servo.org");
 }
 
+/*
+ * Keep cookies across runs in $SERVO_GTK_DATA_DIR, if it is set. Without it
+ * they only last as long as the process.
+ *
+ * Has to happen before the first web view exists: Servo reads the directory
+ * once, when it starts, and writes it back when the last web view is freed.
+ */
+static void
+apply_data_dir(void)
+{
+    const gchar *data_dir = g_getenv("SERVO_GTK_DATA_DIR");
+
+    if (data_dir == NULL || *data_dir == '\0') {
+        return;
+    }
+
+    if (!servo_gtk_web_view_set_data_directory(data_dir)) {
+        g_warning("Could not use SERVO_GTK_DATA_DIR=%s; cookies will not be kept", data_dir);
+    }
+}
+
 int
 main(int argc, char **argv)
 {
     GtkApplication *app;
     int status;
+
+    apply_data_dir();
 
     app = gtk_application_new(
         "org.example.ServoGtkDemo",

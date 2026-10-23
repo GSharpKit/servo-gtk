@@ -24,6 +24,7 @@ use std::cell::{Cell, RefCell};
 use std::env;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::mem::ManuallyDrop;
+use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::Once;
@@ -36,7 +37,7 @@ use servo::{
     JavaScriptEvaluationError,
     Key, KeyState, KeyboardEvent, LoadStatus, Location, Modifiers, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseMoveEvent, NamedKey, NavigationRequest, PrefValue, Preferences, RenderingContext, Scroll,
-    Servo, ServoBuilder, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
+    Opts, Servo, ServoBuilder, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WebViewVector,
 };
 use url::Url;
 
@@ -580,6 +581,11 @@ thread_local! {
 
     /// Handles currently alive, i.e. users of [`SHARED_SERVO`].
     static LIVE_HANDLES: Cell<usize> = const { Cell::new(0) };
+
+    /// Where the shared instance keeps its cookies, set by
+    /// [`servo_webview_set_data_directory`]. Read once, when
+    /// [`SHARED_SERVO`] is built; `None` keeps everything in memory.
+    static DATA_DIRECTORY: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 /// The process-wide Servo instance, built on first use. See [`SHARED_SERVO`].
@@ -597,7 +603,12 @@ fn shared_servo() -> Option<Servo> {
         let mut cell = cell.borrow_mut();
         let servo = cell.get_or_insert_with(|| {
             diagnostics::trace("building the shared Servo instance");
+            let opts = Opts {
+                config_dir: DATA_DIRECTORY.with(|dir| dir.borrow().clone()),
+                ..Opts::default()
+            };
             let servo = ServoBuilder::default()
+                .opts(opts)
                 .preferences(experimental_preferences())
                 .build();
             diagnostics::trace("shared Servo instance built");
@@ -628,6 +639,61 @@ fn release_shared_servo() {
         drop(ManuallyDrop::into_inner(servo));
         diagnostics::trace("shared Servo instance shut down");
     }
+}
+
+/// Make the shared Servo instance read its cookies from, and write them back
+/// to, `<path>/cookie_jar.json`. NULL turns that off again (the default:
+/// cookies only live as long as the process).
+///
+/// This is Servo's `config_dir`, so the same directory also gets
+/// `hsts_list.json`, `auth_cache.json` -- HTTP authentication credentials, in
+/// plain text -- and `localstorage.json`. Pick a directory only the user can
+/// read.
+///
+/// Servo reads the files once, when it is built by the first
+/// `servo_webview_new*`, and writes them when it shuts down, i.e. when the
+/// last handle is freed; a process that exits without freeing its handles
+/// keeps nothing. Options cannot change after that, so this returns false
+/// once Servo exists, as well as when `path` is not valid UTF-8 or the
+/// directory cannot be created. It is created here, not left to Servo: Servo
+/// panics at shutdown if it cannot create the files.
+///
+/// # Safety
+/// `path` must be NULL or a valid NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_set_data_directory(path: *const c_char) -> bool {
+    let built = SERVO_SHUT_DOWN.load(Ordering::Acquire)
+        || SHARED_SERVO.with(|cell| cell.borrow().is_some());
+    if built {
+        eprintln!("servo_webview_set_data_directory: Servo is already running");
+        return false;
+    }
+
+    let directory = if path.is_null() {
+        None
+    } else {
+        let Ok(path) = (unsafe { CStr::from_ptr(path) }).to_str() else {
+            eprintln!("servo_webview_set_data_directory: path is not valid UTF-8");
+            return false;
+        };
+        // Absolute, so that it still names the same place if the host changes
+        // its working directory before Servo writes the files at shutdown.
+        let directory = match std::path::absolute(path) {
+            Ok(directory) => directory,
+            Err(error) => {
+                eprintln!("servo_webview_set_data_directory: {path}: {error}");
+                return false;
+            }
+        };
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            eprintln!("servo_webview_set_data_directory: {}: {error}", directory.display());
+            return false;
+        }
+        Some(directory)
+    };
+
+    DATA_DIRECTORY.with(|dir| *dir.borrow_mut() = directory);
+    true
 }
 
 /// One-time, process-global initialisation of the TLS crypto provider. Safe to
