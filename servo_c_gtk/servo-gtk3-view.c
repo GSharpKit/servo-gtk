@@ -986,11 +986,31 @@ servo_gtk_web_view_on_gl_unrealize(GtkWidget *area, gpointer user_data)
     }
 }
 
-/* SERVO_GTK_RENDERER=cpu skips the GL area; anything else lets GL be tried. */
+/*
+ * Whether to try the GL area. SERVO_GTK_RENDERER forces the choice when set:
+ * "cpu" skips GL, "gl" demands it. With no override the default is host GL,
+ * except on macOS: the GL stacks shipped with macOS GTK builds cannot drive
+ * Servo's compositor (the frame comes back blank), so the CPU/swgl path is the
+ * default there -- which is also this project's baseline (must work with no
+ * GPU/GL). Set SERVO_GTK_RENDERER=gl to opt back in.
+ */
 static gboolean
 servo_gtk_web_view_wants_gl(void)
 {
-    return g_strcmp0(g_getenv("SERVO_GTK_RENDERER"), "cpu") != 0;
+    const gchar *renderer = g_getenv("SERVO_GTK_RENDERER");
+
+    if (g_strcmp0(renderer, "cpu") == 0) {
+        return FALSE;
+    }
+    if (g_strcmp0(renderer, "gl") == 0) {
+        return TRUE;
+    }
+
+#ifdef __APPLE__
+    return FALSE;
+#else
+    return TRUE;
+#endif
 }
 
 /* Replace the drawing child with a GtkGLArea (use_gl) or a GtkDrawingArea. */
