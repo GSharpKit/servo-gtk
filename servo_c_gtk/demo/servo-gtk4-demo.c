@@ -605,13 +605,9 @@ close_tab(DemoTab *tab)
      * the view, it is disposed right here. */
     gtk_notebook_remove_page(notebook, page_num);
     /*
-     * The last web view takes the shared Servo instance down with it, and
-     * Servo cannot be started twice in one process, so a window with no tabs
-     * could never get a working one again. Close it instead, as browsers do.
+     * The window stays open with no tabs: Servo keeps running while the
+     * application does, so the new-tab button still gives a working one.
      */
-    if (gtk_notebook_get_n_pages(notebook) == 0) {
-        gtk_window_close(GTK_WINDOW(win->window));
-    }
 }
 
 static void
@@ -873,31 +869,11 @@ activate(GtkApplication *app, gpointer user_data)
     gtk_window_present(GTK_WINDOW(window));
 }
 
-/*
- * Keep cookies across runs in $SERVO_GTK_DATA_DIR, if it is set. Without it
- * they only last as long as the process.
- *
- * Has to happen before the first web view exists: Servo reads the directory
- * once, when it starts, and writes it back when the last web view is freed.
- */
-static void
-apply_data_dir(void)
-{
-    const gchar *data_dir = g_getenv("SERVO_GTK_DATA_DIR");
-
-    if (data_dir == NULL || *data_dir == '\0') {
-        return;
-    }
-
-    if (!servo_gtk_web_view_set_data_directory(data_dir)) {
-        g_warning("Could not use SERVO_GTK_DATA_DIR=%s; cookies will not be kept", data_dir);
-    }
-}
-
 int
 main(int argc, char **argv)
 {
     GtkApplication *app;
+    const gchar *data_dir;
     int status;
 
 #ifdef G_OS_WIN32
@@ -919,7 +895,20 @@ main(int argc, char **argv)
     g_setenv("GSK_RENDERER", "cairo", FALSE);
 #endif
 
-    apply_data_dir();
+    /*
+     * Servo has to be initialized before the first web view exists. Cookies
+     * are kept across runs in $SERVO_GTK_DATA_DIR, if it is set; without it
+     * they only last as long as the process.
+     */
+    data_dir = g_getenv("SERVO_GTK_DATA_DIR");
+    if (data_dir != NULL && *data_dir == '\0') {
+        data_dir = NULL;
+    }
+    if (!servo_gtk_init(data_dir)) {
+        g_printerr("Could not initialize Servo (SERVO_GTK_DATA_DIR=%s)\n",
+                   data_dir != NULL ? data_dir : "unset");
+        return 1;
+    }
 
     app = gtk_application_new(
         "org.example.ServoGtk4Demo",
@@ -931,6 +920,9 @@ main(int argc, char **argv)
     status = g_application_run(G_APPLICATION(app), argc, argv);
 
     g_object_unref(app);
+
+    /* Every window, and with it every web view, is gone by now. */
+    servo_gtk_release();
 
     return status;
 }

@@ -59,9 +59,23 @@ typedef void (*ServoUrlChangedCallback)(const char *url,
                                         void       *user_data);
 
 /*
+ * Keep Servo running while no webview exists, until the matching
+ * servo_webview_release_engine(). Without a hold, the last servo_webview_free()
+ * shuts Servo down, and since it cannot be started twice in one process every
+ * later servo_webview_new*() returns NULL. Take one for as long as the
+ * application runs and release it when the application quits -- Servo then
+ * shuts down there, or at the last servo_webview_free() if handles remain.
+ * A Servo still running when the process exits crashes it, so do release it.
+ *
+ * Holds are counted. Returns false, taking none, once Servo has shut down.
+ */
+bool servo_webview_hold_engine(void);
+void servo_webview_release_engine(void);
+
+/*
  * Persist cookies in `path`/cookie_jar.json: read when Servo starts (the first
  * servo_webview_new*()), written when it shuts down (the last
- * servo_webview_free()). NULL, the default, keeps cookies in memory only.
+ * servo_webview_free() or servo_webview_release_engine()). NULL, the default, keeps cookies in memory only.
  *
  * Servo uses the same directory for hsts_list.json, localstorage.json and
  * auth_cache.json -- the latter holds HTTP authentication credentials in

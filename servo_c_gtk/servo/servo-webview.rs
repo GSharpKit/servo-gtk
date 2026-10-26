@@ -565,8 +565,10 @@ thread_local! {
     /// painter tears all of that down (`servo-paint-0.7.0/paint.rs:601`). Only
     /// the engine core -- constellation, script, network -- is shared.
     ///
-    /// The instance is shut down when the last handle is freed (see
-    /// [`release_shared_servo`]), and it must be: `ServoInner` owns the
+    /// The instance is shut down when the last user lets go of it -- the
+    /// last handle is freed, or the host releases the hold it took with
+    /// [`servo_webview_hold_engine`] -- (see [`release_shared_servo`]), and
+    /// it must be: `ServoInner` owns the
     /// `JSEngineSetup` whose drop is `JS_ShutDown`. Left running, SpiderMonkey
     /// is still alive when `exit()` runs its C++ static destructors, and
     /// `~MutexImpl` finds a mutex its helper threads hold, gets EBUSY from
@@ -579,7 +581,8 @@ thread_local! {
     /// under the loader lock).
     static SHARED_SERVO: RefCell<Option<ManuallyDrop<Servo>>> = const { RefCell::new(None) };
 
-    /// Handles currently alive, i.e. users of [`SHARED_SERVO`].
+    /// Users of [`SHARED_SERVO`]: handles currently alive, plus holds taken
+    /// with [`servo_webview_hold_engine`].
     static LIVE_HANDLES: Cell<usize> = const { Cell::new(0) };
 
     /// Where the shared instance keeps its cookies, set by
@@ -592,7 +595,7 @@ thread_local! {
 ///
 /// Returns `None` once it has been shut down: neither Servo's options nor
 /// SpiderMonkey can be initialised a second time in one process, so after the
-/// last webview is gone no new one can be made. Failing here, rather than
+/// last user is gone no new webview can be made. Failing here, rather than
 /// letting `ServoBuilder::build()` panic across the FFI boundary, keeps the
 /// host alive.
 fn shared_servo() -> Option<Servo> {
@@ -618,8 +621,9 @@ fn shared_servo() -> Option<Servo> {
     })
 }
 
-/// Drop one handle's claim on the shared instance, and shut Servo down if it
-/// was the last. Call after the handle (and its `WebView`) has been dropped.
+/// Drop one user's claim on the shared instance -- a handle's, or a hold's --
+/// and shut Servo down if it was the last. Call after the handle (and its
+/// `WebView`) has been dropped.
 fn release_shared_servo() {
     let remaining = LIVE_HANDLES.with(|count| {
         let remaining = count.get().saturating_sub(1);
@@ -635,10 +639,42 @@ fn release_shared_servo() {
     let servo = SHARED_SERVO.with(|cell| cell.borrow_mut().take());
     if let Some(servo) = servo {
         SERVO_SHUT_DOWN.store(true, Ordering::Release);
-        diagnostics::trace("last webview freed, shutting the shared Servo instance down");
+        diagnostics::trace("last user gone, shutting the shared Servo instance down");
         drop(ManuallyDrop::into_inner(servo));
         diagnostics::trace("shared Servo instance shut down");
     }
+}
+
+/// Keep the shared Servo instance alive while no webview exists, until the
+/// matching [`servo_webview_release_engine`].
+///
+/// Without a hold, freeing the last handle shuts Servo down, and as it cannot
+/// be started again in the same process every later `servo_webview_new*`
+/// returns NULL. A host that may close all its webviews and open new ones --
+/// a browser window whose last tab was closed -- takes a hold for as long as
+/// it runs, and releases it when it quits; Servo then shuts down at that
+/// point, or when the last handle is freed if any are still alive.
+///
+/// It must be released before the process exits: a Servo still running then
+/// crashes the application on its way out (see [`SHARED_SERVO`]).
+///
+/// Holds are counted. Does not build Servo by itself. Returns false, taking
+/// no hold, once Servo has been shut down.
+#[unsafe(no_mangle)]
+pub extern "C" fn servo_webview_hold_engine() -> bool {
+    if SERVO_SHUT_DOWN.load(Ordering::Acquire) {
+        return false;
+    }
+    LIVE_HANDLES.with(|count| count.set(count.get() + 1));
+    true
+}
+
+/// Release a hold taken with [`servo_webview_hold_engine`]. If it was the
+/// last user of Servo, Servo shuts down now, which writes the cookies to the
+/// data directory and spins the engine until it has exited.
+#[unsafe(no_mangle)]
+pub extern "C" fn servo_webview_release_engine() {
+    release_shared_servo();
 }
 
 /// Make the shared Servo instance read its cookies from, and write them back
@@ -652,8 +688,8 @@ fn release_shared_servo() {
 ///
 /// Servo reads the files once, when it is built by the first
 /// `servo_webview_new*`, and writes them when it shuts down, i.e. when the
-/// last handle is freed; a process that exits without freeing its handles
-/// keeps nothing. Options cannot change after that, so this returns false
+/// last handle is freed or the last hold released; a process that exits
+/// without that keeps nothing. Options cannot change after that, so this returns false
 /// once Servo exists, as well as when `path` is not valid UTF-8 or the
 /// directory cannot be created. It is created here, not left to Servo: Servo
 /// panics at shutdown if it cannot create the files.
@@ -1003,7 +1039,8 @@ unsafe fn new_handle(
     let Some(servo) = shared_servo() else {
         eprintln!(
             "servo_webview_new: Servo has already been shut down in this process \
-             (the last webview was freed); it cannot be started again."
+             (the last webview was freed with no servo_webview_hold_engine() \
+             held); it cannot be started again."
         );
         return ptr::null_mut();
     };
@@ -1035,8 +1072,9 @@ unsafe fn new_handle(
 
 /// Destroy a webview handle. Passing NULL is a no-op.
 ///
-/// Freeing the last handle shuts the process-wide Servo instance down (see
-/// `SHARED_SERVO`); after that, [`servo_webview_new`] returns NULL.
+/// Freeing the last handle, with no [`servo_webview_hold_engine`] held,
+/// shuts the process-wide Servo instance down (see `SHARED_SERVO`); after
+/// that, [`servo_webview_new`] returns NULL.
 ///
 /// # Safety
 /// `webview` must be NULL or a pointer from [`servo_webview_new`] that has not

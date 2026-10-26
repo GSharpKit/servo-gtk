@@ -967,7 +967,8 @@ servo_gtk_web_view_on_gl_realize(GtkWidget *area, gpointer user_data)
 /*
  * GtkGLArea::unrealize, which runs before the area destroys its context: the
  * GL handle's WebRender objects live in that context, so the handle has to go
- * now. Freeing the last handle shuts Servo down for the process.
+ * now. Once servo_gtk_release() has been called, freeing the last handle
+ * shuts Servo down for the process.
  */
 static void
 servo_gtk_web_view_on_gl_unrealize(GtkWidget *area, gpointer user_data)
@@ -1049,6 +1050,33 @@ servo_gtk_web_view_set_area(ServoGtkWebView *self, gboolean use_gl)
 }
 
 /*
+ * Calls of servo_gtk_init() not yet matched by servo_gtk_release(). Servo may
+ * only be used while this is non-zero.
+ */
+static guint servo_gtk_init_count = 0;
+
+/*
+ * Whether a web view may create its Servo webview; warns, once, if it may
+ * not. Only servo_gtk_init() makes Servo usable, so that its data directory
+ * is in place before Servo starts and reads it.
+ */
+static gboolean
+servo_gtk_web_view_engine_ready(void)
+{
+    static gboolean warned = FALSE;
+
+    if (servo_gtk_init_count > 0) {
+        return TRUE;
+    }
+
+    if (!warned) {
+        warned = TRUE;
+        g_warning("Servo: servo_gtk_init() has not been called; web views stay blank.");
+    }
+    return FALSE;
+}
+
+/*
  * Create the Servo instance, from the main loop rather than from inside
  * size_allocate(). GTK3 allocates synchronously from gtk_widget_show(), while
  * the widget is still being realized, so the allocation seen there has not
@@ -1069,7 +1097,7 @@ servo_gtk_web_view_create_idle(gpointer user_data)
 
     self->create_idle_id = 0;
 
-    if (self->servo != NULL) {
+    if (self->servo != NULL || !servo_gtk_web_view_engine_ready()) {
         return G_SOURCE_REMOVE;
     }
 
@@ -1138,7 +1166,8 @@ servo_gtk_web_view_create_idle(gpointer user_data)
         /*
          * The CPU path needs no GL, driver or GPU, so this is not about
          * graphics hardware: most likely Servo was already shut down, because
-         * the last web view was freed. The Rust side says why.
+         * servo_gtk_release() was called and the last web view freed. The
+         * Rust side says why.
          */
         g_warning("Servo: the engine could not be created; the web view stays blank.");
     }
@@ -1833,21 +1862,34 @@ servo_gtk_web_view_print_done(ServoGtkWebView             *self,
 }
 
 gboolean
-servo_gtk_web_view_set_data_directory(const gchar *path)
+servo_gtk_init(const gchar *data_dir)
 {
-    gchar *utf8 = NULL;
-    gboolean ok;
+    if (servo_gtk_init_count == 0 && data_dir != NULL) {
+        /* GLib filenames are UTF-8 on Windows already; elsewhere convert them. */
+        gchar *utf8 = g_filename_to_utf8(data_dir, -1, NULL, NULL, NULL);
+        gboolean ok = utf8 != NULL && servo_webview_set_data_directory(utf8);
 
-    /* GLib filenames are UTF-8 on Windows already; elsewhere convert them. */
-    if (path != NULL) {
-        utf8 = g_filename_to_utf8(path, -1, NULL, NULL, NULL);
-        if (utf8 == NULL)
+        g_free(utf8);
+        if (!ok) {
             return FALSE;
+        }
     }
 
-    ok = servo_webview_set_data_directory(utf8);
-    g_free(utf8);
-    return ok;
+    if (!servo_webview_hold_engine()) {
+        return FALSE;
+    }
+
+    servo_gtk_init_count++;
+    return TRUE;
+}
+
+void
+servo_gtk_release(void)
+{
+    g_return_if_fail(servo_gtk_init_count > 0);
+
+    servo_gtk_init_count--;
+    servo_webview_release_engine();
 }
 
 gboolean

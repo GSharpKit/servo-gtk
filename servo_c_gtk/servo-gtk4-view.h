@@ -15,9 +15,9 @@
  * drawing area. Set SERVO_GTK_RENDERER=cpu to skip the GL attempt.
  *
  * A GL web view is shut down when it is unrealized (its context goes away
- * with the GL area), and freeing the last web view shuts Servo down for the
- * process. Do not unrealize and re-realize the only web view -- e.g. by
- * moving it to another window -- and expect it to come back.
+ * with the GL area). Servo itself runs from servo_gtk_init() to
+ * servo_gtk_release(), so web views can be closed and new ones opened at any
+ * time in between.
  *
  * GTK4 itself is a different matter. GSK's default renderer wants OpenGL,
  * which on Windows it reaches through libepoxy loading ANGLE's libEGL.dll and
@@ -258,26 +258,46 @@ typedef void (*ServoGtkPrintResultCallback) (
 );
 
 /**
- * servo_gtk_web_view_set_data_directory:
- * @path: (type filename) (nullable): directory to keep cookies in, or %NULL
- *   to keep them in memory only
+ * servo_gtk_init:
+ * @data_dir: (type filename) (nullable): directory to keep cookies in, or
+ *   %NULL to keep them in memory only
  *
- * Makes every #ServoGtkWebView in the process read its cookies from, and
- * write them back to, `cookie_jar.json` in @path. The file is read when the
- * first web view is created and written when the last one is freed; the
- * directory is created if it does not exist.
+ * Makes Servo available to #ServoGtkWebView. Call it before the first web
+ * view is created -- until then web views stay blank -- and call
+ * servo_gtk_release() when done, typically around g_application_run().
  *
- * Servo keeps `hsts_list.json`, `localstorage.json` and `auth_cache.json` in
- * the same directory. The last holds HTTP authentication credentials in plain
- * text, so use a directory only the user can read, e.g. one below
+ * Servo itself starts with the first web view, and keeps running while there
+ * is none until servo_gtk_release(), so web views can be closed and new ones
+ * opened at any time. It cannot be started again in the same process once it
+ * has shut down.
+ *
+ * Cookies are read from `cookie_jar.json` in @data_dir when Servo starts and
+ * written back when it shuts down; the directory is created if it does not
+ * exist. Servo keeps `hsts_list.json`, `localstorage.json` and
+ * `auth_cache.json` there too. The last holds HTTP authentication credentials
+ * in plain text, so use a directory only the user can read, e.g. one below
  * g_get_user_data_dir().
  *
- * Must be called before the first web view is created.
+ * Calls are counted and each needs its own servo_gtk_release(). Only the
+ * first sets the data directory; @data_dir is ignored by later ones.
  *
- * Returns: %TRUE on success; %FALSE if a web view already exists or the
- *   directory cannot be created
+ * Returns: %TRUE on success; %FALSE if Servo has already been shut down or
+ *   @data_dir cannot be used, in which case servo_gtk_release() must not be
+ *   called for it
  */
-gboolean servo_gtk_web_view_set_data_directory(const gchar *path);
+gboolean servo_gtk_init(const gchar *data_dir);
+
+/**
+ * servo_gtk_release:
+ *
+ * Undoes one servo_gtk_init(). The last one shuts Servo down, which writes the
+ * cookies to the data directory -- or, if web views still exist, the last of
+ * them to be freed does. Destroy every web view first: a Servo still running
+ * when the process exits crashes it.
+ *
+ * No web view can be created after Servo has shut down.
+ */
+void servo_gtk_release(void);
 
 /**
  * servo_gtk_web_view_can_print:

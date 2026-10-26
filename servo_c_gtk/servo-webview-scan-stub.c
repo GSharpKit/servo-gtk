@@ -21,6 +21,17 @@
 #include "servo-pdf-server.h"
 
 bool
+servo_webview_hold_engine(void)
+{
+    return false;
+}
+
+void
+servo_webview_release_engine(void)
+{
+}
+
+bool
 servo_webview_set_data_directory(const char *path)
 {
     (void) path;
